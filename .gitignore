@@ -1,0 +1,11 @@
+# python
+*.pyc
+*.pyo
+
+# emacs
+*~
+\#*\#
+.\#*
+
+# OSX
+.DS_Store
