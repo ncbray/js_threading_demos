@@ -1,6 +1,6 @@
 "use strict";
 
-(function(){
+(function(exports){
   // Copied from utility library
   var loadShader = function(gl, shaderSource, shaderType, opt_errorCallback) {
     var errFn = opt_errorCallback || error;
@@ -70,15 +70,6 @@ gl_FragColor = vec4(0.2, 0.2, 0.4, 1.0); \
 } \
 ";
 
-  // sRGB
-  var linearToGamma = function(l) {
-    if (l > 0.0031308) {
-      return 1.055 * Math.pow(l, 1/2.4) - 0.055;
-    } else {
-      return 12.92 * l;
-    }
-  }
-
   var simulateShard = function(i, dt) {
     var simulator = state.simulators[i];
     simulator.simulate(dt, config.substeps, function(p) {
@@ -92,7 +83,7 @@ gl_FragColor = vec4(0.2, 0.2, 0.4, 1.0); \
       state.waiting -= 1;
       if (state.waiting <= 0) {
         simTime.end();
-        requestAnimFrame(frame);
+        runner.scheduleFrame();
       }
     });
   }
@@ -108,11 +99,7 @@ gl_FragColor = vec4(0.2, 0.2, 0.4, 1.0); \
     }
   }
 
-  var frame = function() {
-    var dt = startFrame();
-
-    dt = Math.max(Math.min(dt, 0.25), 0);
-
+  var frame = function(dt) {
     // Slow down
     dt *= 0.2;
 
@@ -121,14 +108,17 @@ gl_FragColor = vec4(0.2, 0.2, 0.4, 1.0); \
     // Animate
     state.phase += dt / 8;
     state.phase %= 1.0;
+    draw();
+  }
 
+  var draw = function() {
     var gl = state.ctx;
 
     // Draw the background
     var red = (0.5 * Math.cos(state.phase * Math.PI * 2) + 0.5);
-    red = linearToGamma(red * 0.2 + 0.05);
+    red = demolition.linearToGamma(red * 0.2 + 0.05);
     var blue = (0.5 * Math.sin(state.phase * Math.PI * 2) + 0.5);
-    blue = linearToGamma(blue * 0.2 + 0.05);
+    blue = demolition.linearToGamma(blue * 0.2 + 0.05);
     gl.clearColor(red, 0.0, blue, 1.0);
     gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
 
@@ -149,13 +139,6 @@ gl_FragColor = vec4(0.2, 0.2, 0.4, 1.0); \
 
     gl.drawArrays(gl.POINTS, 0, state.n);
   };
-
-  var startFrame = function() {
-    var current = performance.now();
-    var dt = current - state.last;
-    state.last = current;
-    return dt / 1000;
-  }
 
   var syncConfig = function() {
     var shards = config.shards;
@@ -194,7 +177,8 @@ gl_FragColor = vec4(0.2, 0.2, 0.4, 1.0); \
     gl.bindBuffer(gl.ARRAY_BUFFER, pBuf);
     gl.bufferData(gl.ARRAY_BUFFER, state.totalBytes, gl.STREAM_DRAW);
     state.pBuf = pBuf;
-    requestAnimFrame(frame);
+
+    runner.scheduleFrame();
   }
 
   var run = function() {
@@ -213,15 +197,12 @@ gl_FragColor = vec4(0.2, 0.2, 0.4, 1.0); \
 
     syncConfig();
 
-    startFrame();
-
     var gui = new dat.GUI({autoPlace: false});
     gui.add(config, "particles", 50000, 200000).step(10000).onFinishChange(syncConfig);
     gui.add(config, "substeps", 1, 32).step(1);
     gui.add(config, "shards", 1, 8).step(1).onFinishChange(syncConfig);
     gui.add(config, "proxy", ["local", "copy", "transfer", "shared"]).onFinishChange(syncConfig);
     document.body.appendChild(gui.domElement);
-
 
     document.body.appendChild(simTime.domElement);
   };
@@ -316,6 +297,9 @@ gl_FragColor = vec4(0.2, 0.2, 0.4, 1.0); \
 
   var state = {simulators: []};
 
-  window.runSoup = run;
+  var runner = new demolition.DemoRunner();
+  runner.maxDelta(0.25).onFrame(frame).autoPump(false);
 
-})();
+  exports.runSoup = run;
+
+})(window);
