@@ -17,29 +17,9 @@
   // Fluid simulation based on:
   // http://www.dgp.toronto.edu/people/stam/reality/Research/pdf/GDC03.pdf
 
-  var advectBlock = function(inp, out, u, v, startX, endX, startY, endY, scale) {
-    for (var j = startY; j < endY; j++) {
-      for (var i = startX; i < endX; i++) {
-        var value = inp.sample(i-u.get(i, j)*scale, j-v.get(i, j)*scale);
-        out.set(i, j, value);
-      }
-    }
-  };
-
-  var advect = function(inp, out, u, v, scale) {
-    var w = inp.width;
-    var h = inp.height;
-    var block = 32;
-    for (var j = 0; j < h; j = j + block) {
-      for (var i = 0; i < w; i = i + block) {
-        advectBlock(inp, out, u, v, i, i+block, j, j+block, scale);
-      }
-    }
-  };
-
-  var diffuse = function(buffers, dx, diff, drag, dt) {
+  var diffuse = function(inp, out, dx, diff, drag, dt) {
     // The input is a good inital approximation of the output.
-    buffers.out.copy(buffers.inp);
+    out.copy(inp);
 
     var denomA = dt * diff;
     if (denomA == 0) {
@@ -49,205 +29,115 @@
     var drag = Math.pow(1-drag, dt);
 
     var jparams = {
-      inp: buffers.inp,
-      fb: buffers.fb,
-      out: buffers.out,
       iterations: 30,
       a: a,
       invB: drag / (4 + a),
     };
-    jacobi(jparams);
 
-    buffers.fb = jparams.fb;
-    buffers.out = jparams.out;
+    return Promise.resolve(undefined).then(function() {
+      return state.proxy.jacobi(inp, out, jparams);
+    });
   };
 
-  var zero = function(buf) {
-    var w = buf.width;
-    var h = buf.height;
-    for (var j = 0; j < h; j++) {
-      for (var i = 0; i < w; i++) {
-        buf.set(i, j, 0);
-      }
-    }
-  };
-
-  var jacobiIteration = function(params) {
-    var inp = params.inp;
-    var fb = params.fb;
-    var out = params.out;
-
-    var a = params.a;
-    var invB = params.invB;
-
-    var w = inp.width;
-    var h = inp.height;
-
-    for (var j = 0; j < h; j++) {
-      for (var i = 0; i < w; i++) {
-        var value = (a * inp.get(i, j) +
-                 fb.get(i-1, j) +
-                 fb.get(i+1, j) +
-                 fb.get(i, j-1) +
-                 fb.get(i, j+1)
-        ) * invB;
-        out.set(i, j, value);
-      }
-    }
-  };
-
-  var jacobi = function(params) {
-    // It is assumed that buffers.out is initialized to a reasonable prediction.
-    // buffers.out will become the first feedback buffer.
-    for (var k = 0; k < params.iterations; k++) {
-      var temp = params.fb;
-      params.fb = params.out;
-      params.out = temp;
-      jacobiIteration(params);
-    }
-  };
-
-  var calcDiv = function(u, v, div, scale) {
-    var w = u.width;
-    var h = u.height
-    for (var j = 0; j < w; j++) {
-      for (var i = 0; i < h; i++) {
-        var value = scale * (
-            u.get(i + 1, j) -
-            u.get(i - 1, j) +
-            v.get(i, j + 1) -
-            v.get(i, j - 1)
-        );
-        div.set(i, j, value);
-      }
-    }
-  };
-
-  var subtractPressure = function(p, u, v, scale) {
-    var w = p.width;
-    var h = p.height;
-    for (var j = 0; j < h; j++) {
-      for (var i = 0; i < w; i++) {
-        var udiff = scale * (p.get(i + 1, j) - p.get(i - 1, j));
-        u.sub(i, j, udiff);
-
-        var vdiff = scale * (p.get(i, j + 1) - p.get(i, j - 1));
-        v.sub(i, j, vdiff);
-      }
-    }
-  };
-
-  var project = function(buffers) {
-    var u = buffers.u;
-    var v = buffers.v;
-    var div = buffers.div;
-    var p = buffers.p;
-    var fb = buffers.fb;
-
+  var project = function(state) {
     var scale = 0.5;
-
-    calcDiv(u, v, div, scale);
-
-    zero(p);
-    var jparams = {
-      inp: div,
-      fb: fb,
-      out:p,
-      iterations: 30,
-      a: -1,
-      invB: 1/4,
-    };
-    jacobi(jparams);
-    fb = jparams.fb;
-    p = jparams.out;
-
-    buffers.p = p;
-    buffers.fb = fb;
-
-    subtractPressure(p, u, v, scale);
+    return Promise.resolve(undefined).then(function() {
+      return state.proxy.calcDiv(state.div, scale);
+    }).then(function() {
+      return state.proxy.zero(state.p);
+    }).then(function() {
+      var jparams = {
+        iterations: 30,
+        a: -1,
+        invB: 1/4,
+      };
+      return Promise.resolve(undefined).then(function() {
+        return state.proxy.jacobi(state.div, state.p, jparams);
+      });
+    }).then(function() {
+      return state.proxy.subtractPressure(state.p, state.u, state.v, scale);
+    }).then(function() {
+      return state.proxy.updateVelocity(state.u, state.v);
+    });
   };
 
-  var simulateFluid = function(dt) {
+  var advectColor = function(state, dt) {
+    // Advect the density.
+    var din = state.r;
+    var dout = state.temp0;
+
+    return Promise.resolve(undefined).then(function() {
+      return state.proxy.advect(din, dout, dt);
+    }).then(function() {
+      state.r = dout;
+      state.temp0 = din;
+      din = state.g;
+      dout = state.temp0;
+    }).then(function() {
+      return state.proxy.advect(din, dout, dt);
+    }).then(function() {
+      state.g = dout;
+      state.temp0 = din;
+      din = state.b;
+      dout = state.temp0;
+    }).then(function() {
+      return state.proxy.advect(din, dout, dt);
+    }).then(function() {
+      state.b = dout;
+      state.temp0 = din;
+    });
+  };
+
+  var updateVelocity = function(state) {
+    // Swap the buffers.
+    var temp = state.u;
+    state.u = state.temp0;
+    state.temp0 = temp;
+
+    temp = state.v;
+    state.v = state.temp1;
+    state.temp1 = temp;
+
+    // Broadcast.
+    return state.proxy.updateVelocity(state.u, state.v);
+  };
+
+  var simulateFluid = function(state, dt) {
     if (dt == 0) {
       return;
     }
     dt *= 10;
 
-    // Advect the density.
-    var din = state.r;
-    var dout = state.temp0;
+    return Promise.resolve(undefined).then(function() {
+      return advectColor(state, dt);
+    }).then(function() {
+      if (config.diffuse != 0) {
+        // Diffuse the velocity.
+        return Promise.resolve(undefined).then(function() {
+          return diffuse(state.u, state.temp0, state.dx, config.diffuse, config.drag, dt);
+        }).then(function() {
+          return diffuse(state.v, state.temp1, state.dx, config.diffuse, config.drag, dt);
+        }).then(function() {
+          return updateVelocity(state);
+        }).then(function() {
+          // Correct the diffused velocity.
+          return project(state);
+        });
+      }
 
-    advect(din, dout, state.u, state.v, dt);
-    state.r = dout;
-    state.temp0 = din;
-
-    din = state.g;
-    dout = state.temp0;
-    advect(din, dout, state.u, state.v, dt);
-    state.g = dout;
-    state.temp0 = din;
-
-    din = state.b;
-    dout = state.temp0;
-    advect(din, dout, state.u, state.v, dt);
-    state.b = dout;
-    state.temp0 = din;
-
-    var buffers = {};
-
-    if (config.diffuse != 0) {
-      // Diffuse the velocity.
-      buffers.inp = state.u;
-      buffers.fb = state.temp0;
-      buffers.out = state.temp1;
-      diffuse(buffers, state.dx, config.diffuse, config.drag, dt);
-      state.u = buffers.out;
-      state.temp0 = buffers.inp;
-      state.temp1 = buffers.fb;
-
-      buffers.inp = state.v;
-      buffers.fb = state.temp0;
-      buffers.out = state.temp1;
-      diffuse(buffers, state.dx, config.diffuse, config.drag, dt);
-      state.v = buffers.out;
-      state.temp0 = buffers.inp;
-      state.temp1 = buffers.fb;
-
-      // Correct the diffused velocity.
-      doProject(state);
-    }
-
-    // Advect the velocity.
-    var u0 = state.u;
-    var v0 = state.v;
-
-    var u1 = state.temp0;
-    var v1 = state.temp1;
-
-    advect(u0, u1, u0, v0, dt);
-    advect(v0, v1, u0, v0, dt);
-
-    state.u = u1;
-    state.v = v1;
-
-    state.temp0 = u0;
-    state.temp1 = v0;
-
-    // Correct the avected velocity.
-    doProject(state);
-  };
-
-  var doProject = function(state) {
-    var buffers = {};
-    buffers.u = state.u;
-    buffers.v = state.v;
-    buffers.div = state.div;
-    buffers.p = state.p;
-    buffers.fb = state.temp0;
-    project(buffers);
-    state.div = buffers.div;
-    state.p = buffers.p;
-    state.temp0 = buffers.fb;
+    }).then(function() {
+      // Advect the velocity.
+      return Promise.resolve(undefined).then(function() {
+        return state.proxy.advect(state.u, state.temp0, dt);
+      }).then(function() {
+        return state.proxy.advect(state.v, state.temp1, dt);
+      }).then(function() {
+        return updateVelocity(state);
+      })
+    }).then(function() {
+      // Correct the avected velocity.
+      return project(state);
+    });
   };
 
   var drawData = function(state, inp, scale, offset) {
@@ -277,7 +167,6 @@
     state.buffer.data.set(state.pixelBytes);
     return state.buffer;
   };
-
 
   var drawCircle = function(data, x, y, r0, r1, c, amt) {
     for (var j = -r1; j <= r1; j++) {
@@ -309,36 +198,52 @@
     drawCircle(state.b, x, y, r0, r1, c, 0.9);
   };
 
-  var frame = function(dt) {
+  var draw = function() {
+      var ctx = state.ctx;
+
+      var d = drawRGBData(state, state.r, state.g, state.b, 1, 0);
+      for (var j = 0; j < state.tile; j++) {
+        for (var i = 0; i < state.tile; i++) {
+          ctx.putImageData(d, (i * state.width)|0, (j * state.height)|0);
+        }
+      }
+
+      if (config.show_debug) {
+        if (true) {
+          var d = drawRGBData(state, state.u, state.v, state.p, 0.2, 0.5);
+          ctx.putImageData(d, state.width * (state.tile - 1), state.height * (state.tile - 1));
+        } else {
+          var u = drawData(state, state.u, 0.2, 0.5);
+          ctx.putImageData(u, state.width * (state.tile - 1), state.height * (state.tile - 2));
+
+          var v = drawData(state, state.v, 0.2, 0.5);
+          ctx.putImageData(v, state.width * (state.tile - 2), state.height * (state.tile - 1));
+
+          var p = drawData(state, state.p, 0.2, 0.5);
+          ctx.putImageData(p, state.width * (state.tile - 1), state.height * (state.tile - 1));
+        }
+      }
+  };
+
+  var autoSplat = function(dt) {
     state.phase = state.phase + dt;
     while (state.phase >= 1.0) {
       splat(state);
       state.phase -= 1.0;
     }
+  };
 
-    simTime.begin();
-    simulateFluid(dt);
-    simTime.end();
-
-    var d = drawRGBData(state, state.r, state.g, state.b, 1, 0);
-
-    var ctx = state.ctx;
-    for (var j = 0; j < state.tile; j++) {
-      for (var i = 0; i < state.tile; i++) {
-        ctx.putImageData(d, (i * state.width)|0, (j * state.height)|0);
-      }
-    }
-
-    if (config.show_all) {
-      var u = drawData(state, state.u, 0.2, 0.5);
-      ctx.putImageData(u, state.width * (state.tile - 1), state.height * (state.tile - 2));
-
-      var v = drawData(state, state.v, 0.2, 0.5);
-      ctx.putImageData(v, state.width * (state.tile - 2), state.height * (state.tile - 1));
-
-      var p = drawData(state, state.p, 0.2, 0.5);
-      ctx.putImageData(p, state.width * (state.tile - 1), state.height * (state.tile - 1));
-    }
+  var frame = function(dt) {
+    Promise.resolve(undefined).then(function() {
+      autoSplat(dt);
+    }).then(draw).then(function() {
+      simTime.begin();
+    }).then(function() {
+      return simulateFluid(state, dt);
+    }).then(function() {
+      simTime.end();
+      runner.scheduleFrame();
+    });
   };
 
   var mouseMove = function(x, y) {
@@ -370,55 +275,41 @@
     state.mouseTime = t;
   };
 
-  var Buffer = function(w, h, data) {
-    if (data == undefined) {
-      data = new Float32Array(new ArrayBuffer(w * h * 4));
-    }
-    this.data = data;
-
-    this.width = w;
-    this.height = h;
-
-    this.wshift = (Math.log(w)/Math.LN2)|0;
-    this.wmask = (w-1)|0;
-    this.hmask = (h-1)|0;
-  };
-
-  Buffer.prototype.get = function(x, y) {
-    return this.data[((y & this.hmask) << this.wshift) | (x & this.wmask)];
-  };
-
-  Buffer.prototype.set = function(x, y, data) {
-    this.data[((y & this.hmask) << this.wshift) | (x & this.wmask)] = data;
-  };
-
-  Buffer.prototype.sub = function(x, y, data) {
-    this.data[((y & this.hmask) << this.wshift) | (x & this.wmask)] -= data;
-  };
-
-  Buffer.prototype.sample = function(x, y) {
-    var lx = Math.floor(x);
-    var bx = x - lx;
-    var ly = Math.floor(y);
-    var by = y - ly;
-
-    var s00 = this.get(lx, ly);
-    var s10 = this.get(lx+1, ly);
-    var s01 = this.get(lx, ly+1);
-    var s11 = this.get(lx+1, ly+1);
-
-    var s0 = demolition.blend(s00, s10, bx);
-    var s1 = demolition.blend(s01, s11, bx);
-    return demolition.blend(s0, s1, by);
-  };
-
-  Buffer.prototype.copy = function(other) {
-    this.data.set(other.data);
-  };
-
-
   var createBuffer = function(w, h) {
-    return new Buffer(w, h);
+    return new fluid.Buffer(w, h);
+  };
+
+
+  var localProxy = function(w, h) {
+    this.fb = createBuffer(w, h);
+  };
+
+  localProxy.prototype.updateVelocity = function(u, v) {
+    this.u = u;
+    this.v = v;
+  };
+
+  localProxy.prototype.advect = function(inp, out, scale) {
+    fluid.advect(inp, out, this.u, this.v, scale);
+  };
+
+  localProxy.prototype.calcDiv = function(div, scale) {
+    fluid.calcDiv(this.u, this.v, div, scale);
+  };
+
+  localProxy.prototype.subtractPressure = function(p, u, v, scale) {
+    fluid.subtractPressure(p, u, v, scale);
+  };
+
+  localProxy.prototype.jacobi = function(inp, out, jparams) {
+    fluid.jacobi(inp, this.fb, out, jparams);
+  };
+
+  localProxy.prototype.zero = function(data) {
+    fluid.zero(data);
+  };
+
+  localProxy.prototype.shutdown = function() {
   };
 
   var syncConfig = function() {
@@ -460,6 +351,9 @@
 
     state.buffer = state.ctx.createImageData(state.width, state.height);
 
+    state.proxy = new localProxy(state.width, state.height);
+    state.proxy.updateVelocity(state.u, state.v);
+
     genNoise(state);
 
     for (var i = 0; i < 10; i++) {
@@ -486,7 +380,7 @@
     gui.add(config, "diffuse", 0, 0.00001);
     gui.add(config, "drag", 0, 0.1);
     gui.add(config, "tiles", [2, 4, 8, 16]).onFinishChange(syncConfig);
-    gui.add(config, "show_all");
+    gui.add(config, "show_debug");
 
     //gui.add(config, "shards", 1, 8).step(1).onFinishChange(syncConfig);
     //gui.add(config, "proxy", ["local", "copy", "transfer", "shared"]).onFinishChange(syncConfig);
@@ -503,7 +397,7 @@
     this.diffuse = 0.000002;
     this.drag = 0;
     this.tiles = 2;
-    this.show_all = false;
+    this.show_debug = false;
 
     this.shards = 4;
     this.proxy = "transfer";
@@ -517,5 +411,5 @@
   var state = {};
 
   var runner = new demolition.DemoRunner();
-  runner.onFrame(frame);
+  runner.onFrame(frame).autoPump(false);
 })(window);
