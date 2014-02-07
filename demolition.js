@@ -13,8 +13,7 @@ window.demolition = {};
     }
   };
 
-
- var linearToByte = function(l) {
+  var linearToByte = function(l) {
     return clamp(Math.round(linearToGamma(l)*255), 0, 255);
   };
 
