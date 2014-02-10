@@ -1,5 +1,7 @@
 "use strict";
 (function(exports) {
+  var sharedMemorySupported = new Array(1, true).shared == true;
+
   var genNoise = function(state) {
     var r = state.r;
     var g = state.g;
@@ -17,7 +19,7 @@
   // Fluid simulation based on:
   // http://www.dgp.toronto.edu/people/stam/reality/Research/pdf/GDC03.pdf
 
-  var diffuse = function(inp, out, dx, diff, drag, dt) {
+  var diffuse = function(proxy, inp, out, dx, diff, drag, dt) {
     // The input is a good inital approximation of the output.
     out.copy(inp);
 
@@ -35,16 +37,16 @@
     };
 
     return Promise.resolve(undefined).then(function() {
-      return state.proxy.jacobi(inp, out, jparams);
+      return proxy.jacobi(inp, out, jparams);
     });
   };
 
-  var project = function(state) {
+  var project = function(proxy, state) {
     var scale = 0.5;
     return Promise.resolve(undefined).then(function() {
-      return state.proxy.calcDiv(state.div, scale);
+      return proxy.calcDiv(state.div, scale);
     }).then(function() {
-      return state.proxy.zero(state.p);
+      return proxy.zero(state.p);
     }).then(function() {
       var jparams = {
         iterations: 30,
@@ -52,43 +54,43 @@
         invB: 1/4,
       };
       return Promise.resolve(undefined).then(function() {
-        return state.proxy.jacobi(state.div, state.p, jparams);
+        return proxy.jacobi(state.div, state.p, jparams);
       });
     }).then(function() {
-      return state.proxy.subtractPressure(state.p, state.u, state.v, scale);
+      return proxy.subtractPressure(state.p, state.u, state.v, scale);
     }).then(function() {
-      return state.proxy.updateVelocity(state.u, state.v);
+      return proxy.updateVelocity(state.u, state.v);
     });
   };
 
-  var advectColor = function(state, dt) {
+  var advectColor = function(proxy, state, dt) {
     // Advect the density.
     var din = state.r;
     var dout = state.temp0;
 
     return Promise.resolve(undefined).then(function() {
-      return state.proxy.advect(din, dout, dt);
+      return proxy.advect(din, dout, dt);
     }).then(function() {
       state.r = dout;
       state.temp0 = din;
       din = state.g;
       dout = state.temp0;
     }).then(function() {
-      return state.proxy.advect(din, dout, dt);
+      return proxy.advect(din, dout, dt);
     }).then(function() {
       state.g = dout;
       state.temp0 = din;
       din = state.b;
       dout = state.temp0;
     }).then(function() {
-      return state.proxy.advect(din, dout, dt);
+      return proxy.advect(din, dout, dt);
     }).then(function() {
       state.b = dout;
       state.temp0 = din;
     });
   };
 
-  var updateVelocity = function(state) {
+  var updateVelocity = function(proxy, state) {
     // Swap the buffers.
     var temp = state.u;
     state.u = state.temp0;
@@ -99,8 +101,10 @@
     state.temp1 = temp;
 
     // Broadcast.
-    return state.proxy.updateVelocity(state.u, state.v);
+    return proxy.updateVelocity(state.u, state.v);
   };
+
+  var tickUID = 0;
 
   var simulateFluid = function(state, dt) {
     if (dt == 0) {
@@ -108,35 +112,38 @@
     }
     dt *= 10;
 
+    var proxy = state.proxy;
+    var tick = tickUID;
+    tickUID += 1;
+
     return Promise.resolve(undefined).then(function() {
-      return advectColor(state, dt);
+      return advectColor(proxy, state, dt);
     }).then(function() {
       if (config.diffuse != 0) {
         // Diffuse the velocity.
         return Promise.resolve(undefined).then(function() {
-          return diffuse(state.u, state.temp0, state.dx, config.diffuse, config.drag, dt);
+          return diffuse(proxy, state.u, state.temp0, state.dx, config.diffuse, config.drag, dt);
         }).then(function() {
-          return diffuse(state.v, state.temp1, state.dx, config.diffuse, config.drag, dt);
+          return diffuse(proxy, state.v, state.temp1, state.dx, config.diffuse, config.drag, dt);
         }).then(function() {
-          return updateVelocity(state);
+          return updateVelocity(proxy, state);
         }).then(function() {
           // Correct the diffused velocity.
-          return project(state);
+          return project(proxy, state);
         });
       }
-
     }).then(function() {
       // Advect the velocity.
       return Promise.resolve(undefined).then(function() {
-        return state.proxy.advect(state.u, state.temp0, dt);
+        return proxy.advect(state.u, state.temp0, dt);
       }).then(function() {
-        return state.proxy.advect(state.v, state.temp1, dt);
+        return proxy.advect(state.v, state.temp1, dt);
       }).then(function() {
-        return updateVelocity(state);
+        return updateVelocity(proxy, state);
       })
     }).then(function() {
       // Correct the avected velocity.
-      return project(state);
+      return project(proxy, state);
     });
   };
 
@@ -234,7 +241,7 @@
   };
 
   var frame = function(dt) {
-    Promise.resolve(undefined).then(function() {
+    state.pending = Promise.resolve(undefined).then(function() {
       autoSplat(dt);
     }).then(draw).then(function() {
       simTime.begin();
@@ -282,35 +289,133 @@
 
   var localProxy = function(w, h) {
     this.fb = createBuffer(w, h);
+    this.alive = true;
   };
 
   localProxy.prototype.updateVelocity = function(u, v) {
+    if (!this.alive) throw "dead proxy";
     this.u = u;
     this.v = v;
   };
 
   localProxy.prototype.advect = function(inp, out, scale) {
+    if (!this.alive) throw "dead proxy";
     fluid.advect(inp, out, this.u, this.v, scale);
   };
 
   localProxy.prototype.calcDiv = function(div, scale) {
+    if (!this.alive) throw "dead proxy";
     fluid.calcDiv(this.u, this.v, div, scale);
   };
 
   localProxy.prototype.subtractPressure = function(p, u, v, scale) {
+    if (!this.alive) throw "dead proxy";
     fluid.subtractPressure(p, u, v, scale);
   };
 
   localProxy.prototype.jacobi = function(inp, out, jparams) {
+    if (!this.alive) throw "dead proxy";
     fluid.jacobi(inp, this.fb, out, jparams);
   };
 
   localProxy.prototype.zero = function(data) {
+    if (!this.alive) throw "dead proxy";
     fluid.zero(data);
   };
 
   localProxy.prototype.shutdown = function() {
+    if (!this.alive) throw "dead proxy";
+    this.alive = false;
   };
+
+
+  var remoteProxy = function(w, h) {
+    this.worker = new Worker('simulation.js');
+    this.alive = true;
+    this.callback = null;
+
+    var proxy = this;
+    this.worker.addEventListener("message", function(e) {
+      if (proxy.alive && proxy.callback) {
+        proxy.callback(e.data);
+      }
+      proxy.callback = null;
+    }, false);
+
+    this.worker.postMessage({type: "init", width: w, height: h})
+
+    // HACK
+    this.fb = createBuffer(w, h);
+  };
+
+  remoteProxy.prototype.updateVelocity = function(u, v) {
+    if (!this.alive) throw "dead proxy";
+
+    this.worker.postMessage({type: "updateVelocity", u: u.data, v: v.data})
+
+    // HACK
+    this.u = u;
+    this.v = v;
+  };
+
+  remoteProxy.prototype.advect = function(inp, out, scale) {
+    if (!this.alive) throw "dead proxy";
+    if (!this.alive) throw "dead proxy";
+    var proxy = this;
+    return new Promise(function(resolve) {
+      proxy.callback = function(result) {
+        inp.data = result.inp;
+        out.data = result.out;
+        resolve();
+      }
+      proxy.worker.postMessage({type: "advect", inp: inp.data, out: out.data, scale: scale}, [inp.data.buffer, out.data.buffer]);
+      //fluid.advect(inp, out, this.u, this.v, scale);
+    });
+  };
+
+  remoteProxy.prototype.calcDiv = function(div, scale) {
+    if (!this.alive) throw "dead proxy";
+    var proxy = this;
+    return new Promise(function(resolve) {
+      proxy.callback = function(result) {
+        div.data = result;
+        resolve();
+      }
+      proxy.worker.postMessage({type: "calcDiv", div: div.data, scale: scale}, [div.data.buffer]);
+      //fluid.calcDiv(proxy.u, proxy.v, div, scale);
+    });
+  };
+
+  remoteProxy.prototype.subtractPressure = function(p, u, v, scale) {
+    if (!this.alive) throw "dead proxy";
+    fluid.subtractPressure(p, u, v, scale);
+  };
+
+  remoteProxy.prototype.jacobi = function(inp, out, jparams) {
+    if (!this.alive) throw "dead proxy";
+    var proxy = this;
+    return new Promise(function(resolve) {
+      proxy.callback = function(result) {
+        inp.data = result.inp;
+        out.data = result.out;
+        resolve();
+      }
+      proxy.worker.postMessage({type: "jacobi", inp: inp.data, out: out.data, params: jparams}, [inp.data.buffer, out.data.buffer]);
+    });
+    //fluid.jacobi(inp, this.fb, out, jparams);
+  };
+
+  remoteProxy.prototype.zero = function(data) {
+    if (!this.alive) throw "dead proxy";
+    fluid.zero(data);
+  };
+
+  remoteProxy.prototype.shutdown = function() {
+    if (!this.alive) throw "dead proxy";
+    this.alive = false;
+    this.worker.terminate();
+  };
+
 
   var syncConfig = function() {
     var c = document.getElementsByTagName("canvas")[0];
@@ -351,7 +456,18 @@
 
     state.buffer = state.ctx.createImageData(state.width, state.height);
 
-    state.proxy = new localProxy(state.width, state.height);
+    if (state.proxy) {
+      state.proxy.shutdown();
+    }
+    if (state.pending) {
+      state.pending.cancel();
+    }
+
+    if (config.proxy == "remote") {
+      state.proxy = new remoteProxy(state.width, state.height);
+    } else {
+      state.proxy = new localProxy(state.width, state.height);
+    }
     state.proxy.updateVelocity(state.u, state.v);
 
     genNoise(state);
@@ -359,6 +475,8 @@
     for (var i = 0; i < 10; i++) {
       splat(state);
     }
+
+    runner.scheduleFrame();
   };
 
   exports.runFluid = function() {
@@ -383,14 +501,12 @@
     gui.add(config, "show_debug");
 
     //gui.add(config, "shards", 1, 8).step(1).onFinishChange(syncConfig);
-    //gui.add(config, "proxy", ["local", "copy", "transfer", "shared"]).onFinishChange(syncConfig);
+    gui.add(config, "proxy", ["local", "remote"]).onFinishChange(syncConfig);
 
     document.body.appendChild(gui.domElement);
 
     // Simulation timer.
     document.body.appendChild(simTime.domElement);
-
-    runner.scheduleFrame();
   };
 
   var Config = function() {
@@ -400,7 +516,7 @@
     this.show_debug = false;
 
     this.shards = 4;
-    this.proxy = "transfer";
+    this.proxy = "local";
   };
 
   var config = new Config();

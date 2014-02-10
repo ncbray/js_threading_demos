@@ -117,6 +117,10 @@
     this.data[((y & this.hmask) << this.wshift) | (x & this.wmask)] -= data;
   };
 
+  var blend = function(x, y, amt) {
+    return x * (1 - amt) + y * amt;
+  };
+
   Buffer.prototype.sample = function(x, y) {
     var lx = Math.floor(x);
     var bx = x - lx;
@@ -128,9 +132,9 @@
     var s01 = this.get(lx, ly+1);
     var s11 = this.get(lx+1, ly+1);
 
-    var s0 = demolition.blend(s00, s10, bx);
-    var s1 = demolition.blend(s01, s11, bx);
-    return demolition.blend(s0, s1, by);
+    var s0 = blend(s00, s10, bx);
+    var s1 = blend(s01, s11, bx);
+    return blend(s0, s1, by);
   };
 
   Buffer.prototype.copy = function(other) {
@@ -148,3 +152,37 @@
   exports.fluid.Buffer = Buffer;
 
 })(this.window || this.self);
+
+if (this.self !== undefined) {
+  var state = {};
+  self.addEventListener('message', function(e) {
+    var msg = e.data;
+
+    if (msg.type == "init") {
+      state.width = msg.width;
+      state.height = msg.height;
+      state.u = new fluid.Buffer(state.width, state.height);
+      state.v = new fluid.Buffer(state.width, state.height);
+      state.inp = new fluid.Buffer(state.width, state.height);
+      state.fb  = new fluid.Buffer(state.width, state.height);
+      state.out = new fluid.Buffer(state.width, state.height);
+    } else if (msg.type == "updateVelocity") {
+      state.u.data = msg.u;
+      state.v.data = msg.v;
+    } else if (msg.type == "calcDiv") {
+      state.out.data = msg.div
+      fluid.calcDiv(state.u, state.v, state.out, msg.scale);
+      self.postMessage(msg.div, [msg.div.buffer]);
+    } else if (msg.type == "jacobi") {
+      state.inp.data = msg.inp
+      state.out.data = msg.out
+      fluid.jacobi(state.inp, state.fb, state.out, msg.params);
+      self.postMessage({inp: msg.inp, out: msg.out}, [msg.inp.buffer, msg.out.buffer]);
+    } else if (msg.type == "advect") {
+      state.inp.data = msg.inp;
+      state.out.data = msg.out;
+      fluid.advect(state.inp, state.out, state.u, state.v, msg.scale);
+      self.postMessage({inp: msg.inp, out: msg.out}, [msg.inp.buffer, msg.out.buffer]);
+    }
+  }, false);
+}

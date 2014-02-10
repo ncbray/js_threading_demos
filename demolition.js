@@ -63,6 +63,7 @@ window.demolition = {};
   var DemoRunner = function(config) {
     this.pump = makePump(this);
     this.maxDelta(0.25).autoPump(true);
+    this.pendingFrame = 0;
   };
 
   DemoRunner.prototype.autoPump = function(ok) {
@@ -81,10 +82,14 @@ window.demolition = {};
   }
 
   DemoRunner.prototype.scheduleFrame = function() {
-    requestAnimFrame(this.pump);
+    if (this.pendingFrame) {
+      cancelRequestAnimFrame(this.pendingFrame);
+    }
+    this.pendingFrame = requestAnimFrame(this.pump);
   };
 
   DemoRunner.prototype.doFrame = function() {
+    this.pendingFrame = 0;
     if (this.autoPump_) {
       this.scheduleFrame();
     }
