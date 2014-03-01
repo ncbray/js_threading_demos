@@ -197,14 +197,14 @@ gl_FragColor = vec4(0.2, 0.2, 0.4, 1.0); \
 
     syncConfig();
 
+    document.body.appendChild(simTime.domElement);
+
     var gui = new dat.GUI({autoPlace: false});
     gui.add(config, "particles", 50000, 200000).step(10000).onFinishChange(syncConfig);
     gui.add(config, "substeps", 1, 32).step(1);
     gui.add(config, "shards", 1, 8).step(1).onFinishChange(syncConfig);
     gui.add(config, "proxy", ["local", "copy", "transfer", "shared"]).onFinishChange(syncConfig);
     document.body.appendChild(gui.domElement);
-
-    document.body.appendChild(simTime.domElement);
   };
 
   var localProxy = function(n) {
@@ -290,8 +290,7 @@ gl_FragColor = vec4(0.2, 0.2, 0.4, 1.0); \
     this.proxy = "transfer";
   };
 
-  var simTime = new Stats();
-  simTime.setMode(1);
+  var simTime = new PerfTracker("Sim", 200, 60);
 
   var config = new Config();
 

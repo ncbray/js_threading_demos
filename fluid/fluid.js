@@ -1,6 +1,5 @@
 "use strict";
 (function(exports) {
-  var sharedMemorySupported = new Array(1, true).shared == true;
 
   var genNoise = function(state) {
     var r = state.r;
@@ -37,7 +36,10 @@
     };
 
     return Promise.resolve(undefined).then(function() {
+      jacobiTime.beginSlice();
       return proxy.jacobi(inp, out, jparams);
+    }).then(function() {
+      jacobiTime.endSlice();
     });
   };
 
@@ -54,9 +56,11 @@
         invB: 1/4,
       };
       return Promise.resolve(undefined).then(function() {
+        jacobiTime.beginSlice();
         return proxy.jacobi(state.div, state.p, jparams);
       });
     }).then(function() {
+        jacobiTime.endSlice();
       return proxy.subtractPressure(state.p, state.u, state.v, scale);
     }).then(function() {
       return proxy.updateVelocity(state.u, state.v);
@@ -69,6 +73,7 @@
     var dout = state.temp0;
 
     return Promise.resolve(undefined).then(function() {
+      advectTime.beginSlice();
       return proxy.advect(din, dout, dt);
     }).then(function() {
       state.r = dout;
@@ -85,6 +90,7 @@
     }).then(function() {
       return proxy.advect(din, dout, dt);
     }).then(function() {
+      advectTime.endSlice();
       state.b = dout;
       state.temp0 = din;
     });
@@ -135,10 +141,12 @@
     }).then(function() {
       // Advect the velocity.
       return Promise.resolve(undefined).then(function() {
+        advectTime.beginSlice();
         return proxy.advect(state.u, state.temp0, dt);
       }).then(function() {
         return proxy.advect(state.v, state.temp1, dt);
       }).then(function() {
+        advectTime.endSlice();
         return updateVelocity(proxy, state);
       })
     }).then(function() {
@@ -206,30 +214,32 @@
   };
 
   var draw = function() {
-      var ctx = state.ctx;
+    drawTime.begin();
+    var ctx = state.ctx;
 
-      var d = drawRGBData(state, state.r, state.g, state.b, 1, 0);
-      for (var j = 0; j < state.tile; j++) {
-        for (var i = 0; i < state.tile; i++) {
-          ctx.putImageData(d, (i * state.width)|0, (j * state.height)|0);
-        }
+    var d = drawRGBData(state, state.r, state.g, state.b, 1, 0);
+    for (var j = 0; j < state.tile; j++) {
+      for (var i = 0; i < state.tile; i++) {
+        ctx.putImageData(d, (i * state.width)|0, (j * state.height)|0);
       }
+    }
 
-      if (config.show_debug) {
-        if (true) {
-          var d = drawRGBData(state, state.u, state.v, state.p, 0.2, 0.5);
-          ctx.putImageData(d, state.width * (state.tile - 1), state.height * (state.tile - 1));
-        } else {
-          var u = drawData(state, state.u, 0.2, 0.5);
-          ctx.putImageData(u, state.width * (state.tile - 1), state.height * (state.tile - 2));
+    if (config.show_debug) {
+      if (true) {
+        var d = drawRGBData(state, state.u, state.v, state.p, 0.2, 0.5);
+        ctx.putImageData(d, state.width * (state.tile - 1), state.height * (state.tile - 1));
+      } else {
+        var u = drawData(state, state.u, 0.2, 0.5);
+        ctx.putImageData(u, state.width * (state.tile - 1), state.height * (state.tile - 2));
 
-          var v = drawData(state, state.v, 0.2, 0.5);
-          ctx.putImageData(v, state.width * (state.tile - 2), state.height * (state.tile - 1));
+        var v = drawData(state, state.v, 0.2, 0.5);
+        ctx.putImageData(v, state.width * (state.tile - 2), state.height * (state.tile - 1));
 
-          var p = drawData(state, state.p, 0.2, 0.5);
-          ctx.putImageData(p, state.width * (state.tile - 1), state.height * (state.tile - 1));
-        }
+        var p = drawData(state, state.p, 0.2, 0.5);
+        ctx.putImageData(p, state.width * (state.tile - 1), state.height * (state.tile - 1));
       }
+    }
+    drawTime.end();
   };
 
   var autoSplat = function(dt) {
@@ -241,15 +251,22 @@
   };
 
   var frame = function(dt) {
+    frameTime.begin();
     state.pending = Promise.resolve(undefined).then(function() {
       autoSplat(dt);
-    }).then(draw).then(function() {
+    }).then(function() {
       simTime.begin();
     }).then(function() {
       return simulateFluid(state, dt);
     }).then(function() {
       simTime.end();
-      runner.scheduleFrame();
+      jacobiTime.commit();
+      advectTime.commit();
+      frameTime.end();
+    }).then(draw).then(function () {
+      if (!config.single_step) {
+        runner.scheduleFrame();
+      }
     });
   };
 
@@ -329,61 +346,116 @@
   };
 
 
-  var remoteProxy = function(w, h) {
-    this.worker = new Worker('simulation.js');
+  var RPCWorker = function(worker) {
+    this.worker = worker;
+    this.uid = 1;
+    this.callbacks = {};
     this.alive = true;
-    this.callback = null;
 
-    var proxy = this;
-    this.worker.addEventListener("message", function(e) {
-      if (proxy.alive && proxy.callback) {
-        proxy.callback(e.data);
+    var this_ = this;
+    worker.addEventListener("message", function(e) {
+      if (!this_.alive) return;
+      var msg = e.data;
+      var callback = this_.callbacks[msg.uid];
+      if (callback) {
+        delete this_.callbacks[msg.uid];
+        callback(msg);
+      } else {
+        console.error(msg);
       }
-      proxy.callback = null;
     }, false);
+  };
 
-    this.worker.postMessage({type: "init", width: w, height: h})
+  RPCWorker.prototype.rpc = function(name, args, callback, transfer) {
+    var uid = 0;
+    if (callback) {
+      uid = this.uid;
+      this.uid += 1;
+      this.callbacks[uid] = callback;
+    }
+    this.worker.postMessage({name: name, uid: uid, args: args}, transfer);
+  };
 
-    // HACK
-    this.fb = createBuffer(w, h);
+  RPCWorker.prototype.terminate = function() {
+    this.alive = false;
+    this.callbacks = {};
+    this.worker.terminate();
+  };
+
+  var containingPOT = function(value) {
+    return Math.pow(2, Math.ceil(Math.log(value)/Math.LN2));
+  };
+
+  var remoteProxy = function(w, h, shards, readonly) {
+    // TODO plumb through horizon.
+    this.policy = new fluid.TorusShardingPolicy(w, h, 29, shards);
+
+    this.shards = [];
+    this.shardOut = [];
+
+    for (var i = 0; i < this.policy.shards; i++) {
+      var worker = new Worker('simulation.js');
+      var shard = new RPCWorker(worker);
+      shard.rpc("init", {width: w, height: h});
+      this.shards.push(shard);
+      // Note image buffers must be power-of-two sized.
+      this.shardOut.push(new fluid.Buffer(
+        containingPOT(this.policy.bufferW),
+        containingPOT(this.policy.bufferH)
+      ));
+    }
+    this.alive = true;
+
+    this.readonly = readonly;
+
+    if (readonly) {
+      this.u = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
+      this.v = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
+      for (var i = 0; i < this.shards.length; i++) {
+        this.shards[i].postMessage(
+          "updateVelocity",
+          {
+            u: this.u.data,
+            v: this.v.data
+          },
+          undefined,
+          [this.u.data.buffer, this.v.data.buffer]
+        );
+      }
+    }
   };
 
   remoteProxy.prototype.updateVelocity = function(u, v) {
     if (!this.alive) throw "dead proxy";
 
-    this.worker.postMessage({type: "updateVelocity", u: u.data, v: v.data})
-
-    // HACK
-    this.u = u;
-    this.v = v;
+    if (this.readonly) {
+      this.u.data.set(u.data);
+      this.v.data.set(v.data);
+      // TODO simulate event send.
+    } else {
+      for (var i = 0; i < this.shards.length; i++) {
+        this.shards[i].rpc(
+          "updateVelocity",
+          {
+            u: u.data,
+            v: v.data
+          }
+        );
+      }
+      // HACK
+      this.u = u;
+      this.v = v;
+    }
   };
 
   remoteProxy.prototype.advect = function(inp, out, scale) {
     if (!this.alive) throw "dead proxy";
-    if (!this.alive) throw "dead proxy";
-    var proxy = this;
-    return new Promise(function(resolve) {
-      proxy.callback = function(result) {
-        inp.data = result.inp;
-        out.data = result.out;
-        resolve();
-      }
-      proxy.worker.postMessage({type: "advect", inp: inp.data, out: out.data, scale: scale}, [inp.data.buffer, out.data.buffer]);
-      //fluid.advect(inp, out, this.u, this.v, scale);
-    });
+    fluid.advect(inp, out, this.u, this.v, scale);
   };
 
   remoteProxy.prototype.calcDiv = function(div, scale) {
     if (!this.alive) throw "dead proxy";
-    var proxy = this;
-    return new Promise(function(resolve) {
-      proxy.callback = function(result) {
-        div.data = result;
-        resolve();
-      }
-      proxy.worker.postMessage({type: "calcDiv", div: div.data, scale: scale}, [div.data.buffer]);
-      //fluid.calcDiv(proxy.u, proxy.v, div, scale);
-    });
+    fluid.calcDiv(this.u, this.v, div, scale);
   };
 
   remoteProxy.prototype.subtractPressure = function(p, u, v, scale) {
@@ -394,15 +466,63 @@
   remoteProxy.prototype.jacobi = function(inp, out, jparams) {
     if (!this.alive) throw "dead proxy";
     var proxy = this;
-    return new Promise(function(resolve) {
-      proxy.callback = function(result) {
-        inp.data = result.inp;
-        out.data = result.out;
-        resolve();
-      }
-      proxy.worker.postMessage({type: "jacobi", inp: inp.data, out: out.data, params: jparams}, [inp.data.buffer, out.data.buffer]);
-    });
-    //fluid.jacobi(inp, this.fb, out, jparams);
+    if (this.shards.length > 1) {
+      return new Promise(function(resolve) {
+        proxy.zero(out);
+        var remaining = proxy.shards.length;
+        for (var i = 0; i < remaining; i++) {
+          (function(i) {
+            var temp = proxy.shardOut[i];
+            proxy.shards[i].rpc(
+              "shardedJacobi",
+              {
+                inp: inp.data,
+                // Can't just send the wrapper object because postmessage strips the type.  Meh.
+                out: temp.data,
+                outW: temp.width,
+                outH: temp.height,
+                x: proxy.policy.bufferX(i),
+                y: proxy.policy.bufferY(i),
+                w: proxy.policy.bufferW,
+                h: proxy.policy.bufferH,
+                params: jparams
+              },
+              function(result) {
+                temp.data = result.out;
+                proxy.policy.gatherShardOutput(i, temp, out);
+                remaining -= 1;
+                if (remaining <= 0) {
+                  resolve();
+                }
+              },
+              [
+                temp.data.buffer
+              ]
+            );
+          })(i);
+        }
+      });
+    } else {
+      return new Promise(function(resolve) {
+        proxy.shards[0].rpc(
+          "jacobi",
+          {
+            inp: inp.data,
+            out: out.data,
+            params: jparams
+          },
+          function(result) {
+            inp.data = result.inp;
+            out.data = result.out;
+            resolve();
+          },
+          [
+            inp.data.buffer,
+            out.data.buffer
+          ]
+        )
+      });
+    }
   };
 
   remoteProxy.prototype.zero = function(data) {
@@ -413,9 +533,10 @@
   remoteProxy.prototype.shutdown = function() {
     if (!this.alive) throw "dead proxy";
     this.alive = false;
-    this.worker.terminate();
+    for (var i = 0; i < this.shards.length; i++) {
+      this.shards[i].terminate();
+    }
   };
-
 
   var syncConfig = function() {
     var c = document.getElementsByTagName("canvas")[0];
@@ -463,8 +584,9 @@
       state.pending.cancel();
     }
 
-    if (config.proxy == "remote") {
-      state.proxy = new remoteProxy(state.width, state.height);
+    var readonly = config.proxy == "readonly";
+    if (config.proxy == "remote" || readonly) {
+      state.proxy = new remoteProxy(state.width, state.height, config.shards, readonly);
     } else {
       state.proxy = new localProxy(state.width, state.height);
     }
@@ -493,20 +615,48 @@
       mouseMove(e.offsetX === undefined ? e.layerX : e.offsetX, e.offsetY === undefined ? e.layerY : e.offsetY);
     });
 
+    // Simulation timer.
+    var parent = document.createElement("span");
+    document.body.appendChild(parent);
+    parent.style.width = "200px";
+    parent.style.display = "inline-block";
+
+    parent.appendChild(simTime.domElement);
+    parent.appendChild(jacobiTime.domElement);
+    parent.appendChild(advectTime.domElement);
+    parent.appendChild(drawTime.domElement);
+    parent.appendChild(frameTime.domElement);
+
+    var button = document.createElement("input");
+    button.type = "button";
+    button.value = "Step";
+    button.disabled = !config.single_step;
+    button.onclick = function() {
+      frame(0.05);
+    };
+    document.body.appendChild(button);
+
     var gui = new dat.GUI({autoPlace: false});
 
     gui.add(config, "diffuse", 0, 0.00001);
     gui.add(config, "drag", 0, 0.1);
-    gui.add(config, "tiles", [2, 4, 8, 16]).onFinishChange(syncConfig);
+    gui.add(config, "tiles", [1, 2, 4, 8, 16]).onFinishChange(syncConfig);
     gui.add(config, "show_debug");
+    gui.add(config, "single_step").onFinishChange(function() {
+      button.disabled = !config.single_step;
+      if (!config.single_step) {
+        runner.scheduleFrame();
+      }
+    });
 
-    //gui.add(config, "shards", 1, 8).step(1).onFinishChange(syncConfig);
-    gui.add(config, "proxy", ["local", "remote"]).onFinishChange(syncConfig);
+    var proxies = ["local", "remote"];
+    if (sharedMemorySupported) {
+      proxies.push("readonly");
+    }
+    gui.add(config, "proxy", proxies).onFinishChange(syncConfig);
+    gui.add(config, "shards", [1, 2, 4, 8, 16]).onFinishChange(syncConfig);
 
     document.body.appendChild(gui.domElement);
-
-    // Simulation timer.
-    document.body.appendChild(simTime.domElement);
   };
 
   var Config = function() {
@@ -514,6 +664,7 @@
     this.drag = 0;
     this.tiles = 2;
     this.show_debug = false;
+    this.single_step = false;
 
     this.shards = 4;
     this.proxy = "local";
@@ -521,10 +672,13 @@
 
   var config = new Config();
 
-  var simTime = new Stats();
-  simTime.setMode(1);
-
   var state = {};
+
+  var simTime = new PerfTracker("Sim", 200, 60);
+  var jacobiTime = new PerfTracker("Jacobian", 200, 60);
+  var advectTime = new PerfTracker("Advect", 200, 60);
+  var drawTime = new PerfTracker("Draw", 200, 60);
+  var frameTime = new PerfTracker("Frame", 200, 60);
 
   var runner = new demolition.DemoRunner();
   runner.onFrame(frame).autoPump(false);

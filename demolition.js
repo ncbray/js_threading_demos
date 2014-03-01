@@ -7,22 +7,10 @@ window.demolition = {};
   // sRGB
   var linearToGamma = function(l) {
     if (l > 0.0031308) {
-      return 1.055 * Math.pow(l, 1/2.4) - 0.055;
+      return 1.055 * Math.pow(l, 0.41666666666667) - 0.055;
     } else {
       return 12.92 * l;
     }
-  };
-
-  var linearToByte = function(l) {
-    return clamp(Math.round(linearToGamma(l)*255), 0, 255);
-  };
-
-  var linearStyle = function(r, g, b) {
-    return "rgb(" + linearToByte(r) + ", " + linearToByte(g) + ", " + linearToByte(b) + ")";
-  };
-
-  var byteColorToInt = function(r, g, b) {
-    return r | g << 8 | b << 16 | 255 << 24;
   };
 
   var clamp = function(v, min, max) {
@@ -35,6 +23,33 @@ window.demolition = {};
     } else {
       return min;
     }
+  };
+
+  // Build a lookup table.
+  var l2g = new Uint8Array(4096);
+  for (var i = 0; i < 4096; i++) {
+    l2g[i] = clamp(Math.round(linearToGamma(i / 4095)*255), 0, 255)
+  }
+
+  var linearToByte = function(l) {
+    var index = Math.round(l * 4095);
+    if (index > 4095) {
+      return 255;
+    } else if (index < 0) {
+      return 0;
+    } else {
+      return l2g[index];
+    }
+    //return clamp(Math.round(Math.sqrt(l)*255), 0, 255);
+    //return clamp(Math.round(linearToGamma(l)*255), 0, 255);
+  };
+
+  var linearStyle = function(r, g, b) {
+    return "rgb(" + linearToByte(r) + ", " + linearToByte(g) + ", " + linearToByte(b) + ")";
+  };
+
+  var byteColorToInt = function(r, g, b) {
+    return r | g << 8 | b << 16 | 255 << 24;
   };
 
   var blend = function(x, y, amt) {
