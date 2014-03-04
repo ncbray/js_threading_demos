@@ -164,7 +164,7 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
   };
 
   var Buffer = function(w, h, data) {
-    if (data == undefined) {
+    if (data === undefined) {
       data = new Float32Array(new ArrayBuffer(w * h * 4));
     }
     this.data = data;
@@ -343,14 +343,19 @@ if (this.self !== undefined) {
       var h = args.height;
       state.width = w;
       state.height = h;
-      state.u = new fluid.Buffer(w, h);
-      state.v = new fluid.Buffer(w, h);
-      state.inp = new fluid.Buffer(w, h);
+      state.u = new fluid.Buffer(w, h, null);
+      state.v = new fluid.Buffer(w, h, null);
+      state.inp = new fluid.Buffer(w, h, null);
       state.fb  = new fluid.Buffer(w, h);
-      state.out = new fluid.Buffer(w, h);
+      state.out = new fluid.Buffer(w, h, null);
+
+      if (args.broadcast) {
+        state.broadcast = new fluid.Buffer(w, h, args.broadcast);
+        console.log(args.broadcast.buffer.shared);
+      }
 
       // TODO size?
-      state.temp = new fluid.Buffer(w, h);
+      state.temp = new fluid.Buffer(w, h, null);
     },
     "updateVelocity": function(msg) {
       var args = msg.args;
@@ -365,17 +370,25 @@ if (this.self !== undefined) {
       self.postMessage({uid: msg.uid, inp: args.inp, out: args.out}, [args.inp.buffer, args.out.buffer]);
     },
     "shardedJacobi": function(msg) {
+      var begin = performance.now();
       var args = msg.args;
-      state.inp.data = args.inp;
+
+      var inp;
+      if (state.broadcast) {
+        inp = state.broadcast;
+      } else {
+        state.inp.data = args.inp;
+        inp = state.inp;
+      }
 
       state.temp.data = args.out;
       state.temp.setSize(args.outW, args.outH);
 
-      //state.temp.copySubrect(state.inp, args.x|0, args.y|0, args.w|0, args.h|0, 0, 0);
-      fluid.jacobiRegion(state.inp, state.fb, state.temp, args.params, args.x, args.y, args.w, args.h);
+      fluid.jacobiRegion(inp, state.fb, state.temp, args.params, args.x, args.y, args.w, args.h);
       self.postMessage({
         uid: msg.uid,
         out: args.out,
+        time: performance.now() - begin
       }, [
         args.out.buffer
       ]);

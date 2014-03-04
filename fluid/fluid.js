@@ -63,7 +63,10 @@
         jacobiTime.endSlice();
       return proxy.subtractPressure(state.p, state.u, state.v, scale);
     }).then(function() {
+      copyTime.beginSlice();
       return proxy.updateVelocity(state.u, state.v);
+    }).then(function() {
+      copyTime.endSlice();
     });
   };
 
@@ -132,8 +135,10 @@
         }).then(function() {
           return diffuse(proxy, state.v, state.temp1, state.dx, config.diffuse, config.drag, dt);
         }).then(function() {
+          copyTime.beginSlice();
           return updateVelocity(proxy, state);
         }).then(function() {
+          copyTime.endSlice();
           // Correct the diffused velocity.
           return project(proxy, state);
         });
@@ -147,9 +152,11 @@
         return proxy.advect(state.v, state.temp1, dt);
       }).then(function() {
         advectTime.endSlice();
+        copyTime.beginSlice();
         return updateVelocity(proxy, state);
       })
     }).then(function() {
+      copyTime.endSlice();
       // Correct the avected velocity.
       return project(proxy, state);
     });
@@ -262,6 +269,7 @@
       simTime.end();
       jacobiTime.commit();
       advectTime.commit();
+      copyTime.commit();
       frameTime.end();
     }).then(draw).then(function () {
       if (!config.single_step) {
@@ -393,10 +401,19 @@
     this.shards = [];
     this.shardOut = [];
 
+    var initArgs = {width: w, height: h};
+    var initTransfer = [];
+
+    if (readonly) {
+      this.broadcast = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
+      initArgs.broadcast = this.broadcast.data;
+      initTransfer.push(this.broadcast.data.buffer);
+    }
+
     for (var i = 0; i < this.policy.shards; i++) {
       var worker = new Worker('simulation.js');
       var shard = new RPCWorker(worker);
-      shard.rpc("init", {width: w, height: h});
+      shard.rpc("init", initArgs, undefined, initTransfer);
       this.shards.push(shard);
       // Note image buffers must be power-of-two sized.
       this.shardOut.push(new fluid.Buffer(
@@ -412,7 +429,7 @@
       this.u = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
       this.v = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
       for (var i = 0; i < this.shards.length; i++) {
-        this.shards[i].postMessage(
+        this.shards[i].rpc(
           "updateVelocity",
           {
             u: this.u.data,
@@ -463,41 +480,77 @@
     fluid.subtractPressure(p, u, v, scale);
   };
 
+  var printStats = function(name, times) {
+    var total = times[0];
+    var min = times[0];
+    var max = times[0];
+    for (var i = 1; i < times.length; i++) {
+      total += times[i];
+      if (times[i] > max) {
+        max = times[i];
+      }
+      if (times[i] < min) {
+        min = times[i];
+      }
+    }
+    console.log(name, min, total / times.length, max);
+  };
+
   remoteProxy.prototype.jacobi = function(inp, out, jparams) {
     if (!this.alive) throw "dead proxy";
     var proxy = this;
+
+    var outsidetime = [];
+    var insidetime = [];
+    var deltatime = [];
+
     if (this.shards.length > 1) {
       return new Promise(function(resolve) {
-        proxy.zero(out);
+        if (proxy.readonly) {
+          proxy.broadcast.copy(inp);
+        }
+        //proxy.zero(out);
         var remaining = proxy.shards.length;
         for (var i = 0; i < remaining; i++) {
           (function(i) {
+            var begin = performance.now();
             var temp = proxy.shardOut[i];
+            var transfer = [temp.data.buffer];
+
+            var args = {
+              // Can't just send the wrapper object because postmessage strips the type.  Meh.
+              out: temp.data,
+              outW: temp.width,
+              outH: temp.height,
+              x: proxy.policy.bufferX(i),
+              y: proxy.policy.bufferY(i),
+              w: proxy.policy.bufferW,
+              h: proxy.policy.bufferH,
+              params: jparams
+            };
+            if (!proxy.readonly) {
+              args.inp = inp.data;
+            }
+
             proxy.shards[i].rpc(
               "shardedJacobi",
-              {
-                inp: inp.data,
-                // Can't just send the wrapper object because postmessage strips the type.  Meh.
-                out: temp.data,
-                outW: temp.width,
-                outH: temp.height,
-                x: proxy.policy.bufferX(i),
-                y: proxy.policy.bufferY(i),
-                w: proxy.policy.bufferW,
-                h: proxy.policy.bufferH,
-                params: jparams
-              },
+              args,
               function(result) {
                 temp.data = result.out;
                 proxy.policy.gatherShardOutput(i, temp, out);
+                var time = performance.now() - begin;
+                outsidetime.push(time);
+                insidetime.push(result.time);
+                deltatime.push(time - result.time);
                 remaining -= 1;
                 if (remaining <= 0) {
+                  //printStats("Outside", outsidetime);
+                  //printStats("Inside", insidetime);
+                  //printStats("Delta", deltatime);
                   resolve();
                 }
               },
-              [
-                temp.data.buffer
-              ]
+              transfer
             );
           })(i);
         }
@@ -624,6 +677,7 @@
     parent.appendChild(simTime.domElement);
     parent.appendChild(jacobiTime.domElement);
     parent.appendChild(advectTime.domElement);
+    parent.appendChild(copyTime.domElement);
     parent.appendChild(drawTime.domElement);
     parent.appendChild(frameTime.domElement);
 
@@ -677,6 +731,7 @@
   var simTime = new PerfTracker("Sim", 200, 60);
   var jacobiTime = new PerfTracker("Jacobian", 200, 60);
   var advectTime = new PerfTracker("Advect", 200, 60);
+  var copyTime = new PerfTracker("Copy", 200, 60);
   var drawTime = new PerfTracker("Draw", 200, 60);
   var frameTime = new PerfTracker("Frame", 200, 60);
 
