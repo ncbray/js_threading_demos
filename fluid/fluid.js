@@ -690,6 +690,23 @@
     };
     document.body.appendChild(button);
 
+
+    var rbutton = document.createElement("input");
+    rbutton.type = "button";
+    rbutton.value = "Reload";
+    rbutton.onclick = function() {
+      var url = window.location.pathname;
+      if (url[url.length - 1] == "/") {
+        url += "index.html"
+      }
+      var query = schema.encode(config);
+      if (query) {
+        url += "?" + query;
+      }
+      window.location.replace(url);
+    };
+    document.body.appendChild(rbutton);
+
     var gui = new dat.GUI({autoPlace: false});
 
     gui.add(config, "diffuse", 0, 0.00001);
@@ -713,18 +730,17 @@
     document.body.appendChild(gui.domElement);
   };
 
-  var Config = function() {
-    this.diffuse = 0.000002;
-    this.drag = 0;
-    this.tiles = 2;
-    this.show_debug = false;
-    this.single_step = false;
+  var schema = new demolition.SettingsSchema();
+  schema.number("diffuse", 0.000002);
+  schema.number("drag", 0);
+  schema.number("tiles", 2);
+  schema.bool("show_debug", false);
+  schema.bool("single_step", false);
 
-    this.shards = 4;
-    this.proxy = "local";
-  };
+  schema.number("shards", 4);
+  schema.string("proxy", "local");
 
-  var config = new Config();
+  var config = schema.decode(demolition.parseQuery());
 
   var state = {};
 
