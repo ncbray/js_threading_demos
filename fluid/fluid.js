@@ -401,7 +401,7 @@
     this.shards = [];
     this.shardOut = [];
 
-    var initArgs = {width: w, height: h};
+    var initArgs = {fullRect: this.policy.fullRect()};
     var initTransfer = [];
 
     if (readonly) {
@@ -413,6 +413,8 @@
     for (var i = 0; i < this.policy.shards; i++) {
       var worker = new Worker('simulation.js');
       var shard = new RPCWorker(worker);
+      initArgs.shardRect = this.policy.shardRect(i);
+      initArgs.bufferRect = this.policy.bufferRect(i);
       shard.rpc("init", initArgs, undefined, initTransfer);
       this.shards.push(shard);
       // Note image buffers must be power-of-two sized.
@@ -522,10 +524,6 @@
               out: temp.data,
               outW: temp.width,
               outH: temp.height,
-              x: proxy.policy.bufferX(i),
-              y: proxy.policy.bufferY(i),
-              w: proxy.policy.bufferW,
-              h: proxy.policy.bufferH,
               params: jparams
             };
             if (!proxy.readonly) {

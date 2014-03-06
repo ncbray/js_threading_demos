@@ -319,6 +319,18 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
     out.copySubrect(buffer, this.padW, this.padH, this.shardW, this.shardH, this.shardX(i), this.shardY(i));
   };
 
+  TorusShardingPolicy.prototype.fullRect = function() {
+    return {x: 0, y: 0, w: this.width, h: this.height};
+  };
+
+  TorusShardingPolicy.prototype.shardRect = function(i) {
+    return {x: this.shardX(i), y: this.shardY(i), w: this.shardW, h: this.shardH};
+  };
+
+  TorusShardingPolicy.prototype.bufferRect = function(i) {
+    return {x: this.bufferX(i), y: this.bufferY(i), w: this.bufferW, h: this.bufferH};
+  };
+
   exports.fluid = {};
   exports.fluid.advect = advect;
   exports.fluid.calcDiv = calcDiv;
@@ -339,10 +351,13 @@ if (this.self !== undefined) {
   var handlers = {
     "init": function(msg) {
       var args = msg.args;
-      var w = args.width;
-      var h = args.height;
-      state.width = w;
-      state.height = h;
+      var w = args.fullRect.w;
+      var h = args.fullRect.h;
+
+      state.fullRect = args.fullRect;
+      state.shardRect = args.shardRect;
+      state.bufferRect = args.bufferRect;
+
       state.u = new fluid.Buffer(w, h, null);
       state.v = new fluid.Buffer(w, h, null);
       state.inp = new fluid.Buffer(w, h, null);
@@ -351,7 +366,6 @@ if (this.self !== undefined) {
 
       if (args.broadcast) {
         state.broadcast = new fluid.Buffer(w, h, args.broadcast);
-        console.log(args.broadcast.buffer.shared);
       }
 
       // TODO size?
@@ -384,7 +398,7 @@ if (this.self !== undefined) {
       state.temp.data = args.out;
       state.temp.setSize(args.outW, args.outH);
 
-      fluid.jacobiRegion(inp, state.fb, state.temp, args.params, args.x, args.y, args.w, args.h);
+      fluid.jacobiRegion(inp, state.fb, state.temp, args.params, state.bufferRect.x, state.bufferRect.y, state.bufferRect.w, state.bufferRect.h);
       self.postMessage({
         uid: msg.uid,
         out: args.out,
