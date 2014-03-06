@@ -311,48 +311,51 @@
     return new fluid.Buffer(w, h);
   };
 
-
-  var localProxy = function(w, h) {
-    this.fb = createBuffer(w, h);
+  var genericProxy = function() {
     this.alive = true;
   };
 
-  localProxy.prototype.updateVelocity = function(u, v) {
+  genericProxy.prototype.updateVelocity = function(u, v) {
     if (!this.alive) throw "dead proxy";
     this.u = u;
     this.v = v;
   };
 
-  localProxy.prototype.advect = function(inp, out, scale) {
+  genericProxy.prototype.advect = function(inp, out, scale) {
     if (!this.alive) throw "dead proxy";
     fluid.advect(inp, out, this.u, this.v, scale);
   };
 
-  localProxy.prototype.calcDiv = function(div, scale) {
+  genericProxy.prototype.calcDiv = function(div, scale) {
     if (!this.alive) throw "dead proxy";
     fluid.calcDiv(this.u, this.v, div, scale);
   };
 
-  localProxy.prototype.subtractPressure = function(p, u, v, scale) {
+  genericProxy.prototype.subtractPressure = function(p, u, v, scale) {
     if (!this.alive) throw "dead proxy";
     fluid.subtractPressure(p, u, v, scale);
   };
 
-  localProxy.prototype.jacobi = function(inp, out, jparams) {
+  genericProxy.prototype.jacobi = function(inp, out, jparams) {
     if (!this.alive) throw "dead proxy";
     fluid.jacobi(inp, this.fb, out, jparams);
   };
 
-  localProxy.prototype.zero = function(data) {
+  genericProxy.prototype.zero = function(data) {
     if (!this.alive) throw "dead proxy";
     fluid.zero(data);
   };
 
-  localProxy.prototype.shutdown = function() {
+  genericProxy.prototype.shutdown = function() {
     if (!this.alive) throw "dead proxy";
     this.alive = false;
   };
 
+  var localProxy = function(w, h) {
+    this.fb = createBuffer(w, h);
+  };
+
+  localProxy.prototype = new genericProxy();
 
   var RPCWorker = function(worker) {
     this.worker = worker;
@@ -390,9 +393,27 @@
     this.worker.terminate();
   };
 
+
   var containingPOT = function(value) {
     return Math.pow(2, Math.ceil(Math.log(value)/Math.LN2));
   };
+
+  var printStats = function(name, times) {
+    var total = times[0];
+    var min = times[0];
+    var max = times[0];
+    for (var i = 1; i < times.length; i++) {
+      total += times[i];
+      if (times[i] > max) {
+        max = times[i];
+      }
+      if (times[i] < min) {
+        min = times[i];
+      }
+    }
+    console.log(name, min, total / times.length, max);
+  };
+
 
   var remoteProxy = function(w, h, shards, readonly) {
     // TODO plumb through horizon.
@@ -423,7 +444,6 @@
         containingPOT(this.policy.bufferH)
       ));
     }
-    this.alive = true;
 
     this.readonly = readonly;
 
@@ -444,6 +464,8 @@
     }
   };
 
+  remoteProxy.prototype = new genericProxy();
+
   remoteProxy.prototype.updateVelocity = function(u, v) {
     if (!this.alive) throw "dead proxy";
 
@@ -461,41 +483,10 @@
           }
         );
       }
-      // HACK
+      // Local methods will also need access to the velocity fields.
       this.u = u;
       this.v = v;
     }
-  };
-
-  remoteProxy.prototype.advect = function(inp, out, scale) {
-    if (!this.alive) throw "dead proxy";
-    fluid.advect(inp, out, this.u, this.v, scale);
-  };
-
-  remoteProxy.prototype.calcDiv = function(div, scale) {
-    if (!this.alive) throw "dead proxy";
-    fluid.calcDiv(this.u, this.v, div, scale);
-  };
-
-  remoteProxy.prototype.subtractPressure = function(p, u, v, scale) {
-    if (!this.alive) throw "dead proxy";
-    fluid.subtractPressure(p, u, v, scale);
-  };
-
-  var printStats = function(name, times) {
-    var total = times[0];
-    var min = times[0];
-    var max = times[0];
-    for (var i = 1; i < times.length; i++) {
-      total += times[i];
-      if (times[i] > max) {
-        max = times[i];
-      }
-      if (times[i] < min) {
-        min = times[i];
-      }
-    }
-    console.log(name, min, total / times.length, max);
   };
 
   remoteProxy.prototype.jacobi = function(inp, out, jparams) {
@@ -511,7 +502,6 @@
         if (proxy.readonly) {
           proxy.broadcast.copy(inp);
         }
-        //proxy.zero(out);
         var remaining = proxy.shards.length;
         for (var i = 0; i < remaining; i++) {
           (function(i) {
@@ -536,10 +526,10 @@
               function(result) {
                 temp.data = result.out;
                 proxy.policy.gatherShardOutput(i, temp, out);
-                var time = performance.now() - begin;
-                outsidetime.push(time);
-                insidetime.push(result.time);
-                deltatime.push(time - result.time);
+                //var time = performance.now() - begin;
+                //outsidetime.push(time);
+                //insidetime.push(result.time);
+                //deltatime.push(time - result.time);
                 remaining -= 1;
                 if (remaining <= 0) {
                   //printStats("Outside", outsidetime);
@@ -576,11 +566,6 @@
     }
   };
 
-  remoteProxy.prototype.zero = function(data) {
-    if (!this.alive) throw "dead proxy";
-    fluid.zero(data);
-  };
-
   remoteProxy.prototype.shutdown = function() {
     if (!this.alive) throw "dead proxy";
     this.alive = false;
@@ -588,6 +573,7 @@
       this.shards[i].terminate();
     }
   };
+
 
   var syncConfig = function() {
     var c = document.getElementsByTagName("canvas")[0];
@@ -636,7 +622,9 @@
     }
 
     var readonly = config.proxy == "readonly";
-    if (config.proxy == "remote" || readonly) {
+    var shared = config.proxy == "shared";
+
+    if (config.proxy == "remote" || readonly || shared) {
       state.proxy = new remoteProxy(state.width, state.height, config.shards, readonly);
     } else {
       state.proxy = new localProxy(state.width, state.height);
@@ -721,6 +709,7 @@
     var proxies = ["local", "remote"];
     if (sharedMemorySupported) {
       proxies.push("readonly");
+      proxies.push("shared");
     }
     gui.add(config, "proxy", proxies).onFinishChange(syncConfig);
     gui.add(config, "shards", [1, 2, 4, 8, 16]).onFinishChange(syncConfig);
