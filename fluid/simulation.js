@@ -163,7 +163,13 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
     jacobiRegion(inp, fb, out, params, 0, 0, w, h);
   };
 
+  var ceilPOT = function(value) {
+    return Math.pow(2, Math.ceil(Math.log(value)/Math.LN2));
+  };
+
   var Buffer = function(w, h, data) {
+    w = ceilPOT(w);
+    h = ceilPOT(h);
     if (data === undefined) {
       data = new Float32Array(new ArrayBuffer(w * h * 4));
     }
@@ -343,6 +349,8 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
 
   exports.fluid.Buffer = Buffer;
 
+  exports.fluid.ceilPOT = ceilPOT;
+
 })(this.window || this.self);
 
 if (this.self !== undefined) {
@@ -354,6 +362,8 @@ if (this.self !== undefined) {
       var w = args.fullRect.w;
       var h = args.fullRect.h;
 
+      state.padW = args.padW;
+      state.padH = args.padH;
       state.fullRect = args.fullRect;
       state.shardRect = args.shardRect;
       state.bufferRect = args.bufferRect;
@@ -364,12 +374,12 @@ if (this.self !== undefined) {
       state.fb  = new fluid.Buffer(w, h);
       state.out = new fluid.Buffer(w, h, null);
 
+      // HACK assuming readonly based on presense of args.broadcast.
       if (args.broadcast) {
         state.broadcast = new fluid.Buffer(w, h, args.broadcast);
+        state.reply = new fluid.Buffer(w, h, args.reply);
       }
-
-      // TODO size?
-      state.temp = new fluid.Buffer(w, h, null);
+      state.temp = new fluid.Buffer(state.bufferRect.w, state.bufferRect.h);
     },
     "updateVelocity": function(msg) {
       var args = msg.args;
@@ -386,19 +396,11 @@ if (this.self !== undefined) {
     "shardedJacobi": function(msg) {
       var begin = performance.now();
       var args = msg.args;
-
-      var inp;
-      if (state.broadcast) {
-        inp = state.broadcast;
-      } else {
-        state.inp.data = args.inp;
-        inp = state.inp;
-      }
-
+      state.inp.data = args.inp;
       state.temp.data = args.out;
-      state.temp.setSize(args.outW, args.outH);
-
-      fluid.jacobiRegion(inp, state.fb, state.temp, args.params, state.bufferRect.x, state.bufferRect.y, state.bufferRect.w, state.bufferRect.h);
+      fluid.jacobiRegion(state.inp, state.fb, state.temp, args.params,
+                         state.bufferRect.x, state.bufferRect.y,
+                         state.bufferRect.w, state.bufferRect.h);
       self.postMessage({
         uid: msg.uid,
         out: args.out,
@@ -406,6 +408,23 @@ if (this.self !== undefined) {
       }, [
         args.out.buffer
       ]);
+    },
+    "shardedJacobiRO": function(msg) {
+      var begin = performance.now();
+      var args = msg.args;
+      fluid.jacobiRegion(state.broadcast, state.fb, state.temp, args.params,
+                         state.bufferRect.x, state.bufferRect.y,
+                         state.bufferRect.w, state.bufferRect.h);
+      state.reply.copySubrect(
+        state.temp,
+        state.padW, state.padH,
+        state.shardRect.w, state.shardRect.h,
+        state.shardRect.x, state.shardRect.y
+      );
+      self.postMessage({
+        uid: msg.uid,
+        time: performance.now() - begin
+      });
     },
   };
 

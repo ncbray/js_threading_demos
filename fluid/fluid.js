@@ -393,11 +393,6 @@
     this.worker.terminate();
   };
 
-
-  var containingPOT = function(value) {
-    return Math.pow(2, Math.ceil(Math.log(value)/Math.LN2));
-  };
-
   var printStats = function(name, times) {
     var total = times[0];
     var min = times[0];
@@ -422,13 +417,22 @@
     this.shards = [];
     this.shardOut = [];
 
-    var initArgs = {fullRect: this.policy.fullRect()};
+    var initArgs = {
+      padW: this.policy.padW,
+      padH: this.policy.padH,
+      fullRect: this.policy.fullRect()
+    };
     var initTransfer = [];
 
     if (readonly) {
       this.broadcast = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
       initArgs.broadcast = this.broadcast.data;
       initTransfer.push(this.broadcast.data.buffer);
+
+
+      this.reply = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
+      initArgs.reply = this.reply.data;
+      initTransfer.push(this.reply.data.buffer);
     }
 
     for (var i = 0; i < this.policy.shards; i++) {
@@ -438,11 +442,8 @@
       initArgs.bufferRect = this.policy.bufferRect(i);
       shard.rpc("init", initArgs, undefined, initTransfer);
       this.shards.push(shard);
-      // Note image buffers must be power-of-two sized.
-      this.shardOut.push(new fluid.Buffer(
-        containingPOT(this.policy.bufferW),
-        containingPOT(this.policy.bufferH)
-      ));
+      // Note image buffers will be expanded to a containing power-of-two size.
+      this.shardOut.push(new fluid.Buffer(this.policy.bufferW, this.policy.bufferH));
     }
 
     this.readonly = readonly;
@@ -497,6 +498,18 @@
     var insidetime = [];
     var deltatime = [];
 
+    var shardDone = function(outside, inside) {
+      outsidetime.push(outside);
+      insidetime.push(inside);
+      deltatime.push(outside - inside);
+    };
+
+    var printAllStats = function() {
+      printStats("Outside", outsidetime);
+      printStats("Inside", insidetime);
+      printStats("Delta", deltatime);
+    };
+
     if (this.shards.length > 1) {
       return new Promise(function(resolve) {
         if (proxy.readonly) {
@@ -505,41 +518,45 @@
         var remaining = proxy.shards.length;
         for (var i = 0; i < remaining; i++) {
           (function(i) {
-            var begin = performance.now();
-            var temp = proxy.shardOut[i];
-            var transfer = [temp.data.buffer];
-
-            var args = {
-              // Can't just send the wrapper object because postmessage strips the type.  Meh.
-              out: temp.data,
-              outW: temp.width,
-              outH: temp.height,
-              params: jparams
-            };
-            if (!proxy.readonly) {
-              args.inp = inp.data;
-            }
-
-            proxy.shards[i].rpc(
-              "shardedJacobi",
-              args,
-              function(result) {
-                temp.data = result.out;
-                proxy.policy.gatherShardOutput(i, temp, out);
-                //var time = performance.now() - begin;
-                //outsidetime.push(time);
-                //insidetime.push(result.time);
-                //deltatime.push(time - result.time);
-                remaining -= 1;
-                if (remaining <= 0) {
-                  //printStats("Outside", outsidetime);
-                  //printStats("Inside", insidetime);
-                  //printStats("Delta", deltatime);
-                  resolve();
+            //var begin = performance.now();
+            if (proxy.readonly) {
+              proxy.shards[i].rpc(
+                "shardedJacobiRO",
+                {
+                  params: jparams
+                },
+                function(result) {
+                  //shardDone(performance.now() - begin, result.time);
+                  remaining -= 1;
+                  if (remaining <= 0) {
+                    out.copy(proxy.reply);
+                    //printAllStats();
+                    resolve();
+                  }
                 }
-              },
-              transfer
-            );
+              );
+            } else {
+              var temp = proxy.shardOut[i];
+              proxy.shards[i].rpc(
+                "shardedJacobi",
+                {
+                  inp: inp.data,
+                  out: temp.data,
+                  params: jparams
+                },
+                function(result) {
+                  temp.data = result.out;
+                  proxy.policy.gatherShardOutput(i, temp, out);
+                  //shardDone(performance.now() - begin, result.time);
+                  remaining -= 1;
+                  if (remaining <= 0) {
+                    //printAllStats();
+                    resolve();
+                  }
+                },
+                [temp.data.buffer]
+              );
+            }
           })(i);
         }
       });
