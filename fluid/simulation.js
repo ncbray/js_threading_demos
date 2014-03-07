@@ -431,14 +431,14 @@ if (this.self !== undefined) {
   var handlers = {
     "init": function(msg) {
       var args = msg.args;
-      var w = args.fullRect.w;
-      var h = args.fullRect.h;
+      var w = args.w;
+      var h = args.h;
 
-      state.padW = args.padW;
-      state.padH = args.padH;
-      state.fullRect = args.fullRect;
-      state.shardRect = args.shardRect;
-      state.bufferRect = args.bufferRect;
+      state.w = args.w;
+      state.h = args.h;
+
+      state.workerID = args.workerID;
+      state.shards = args.shards;
 
       state.u = new fluid.Buffer(w, h, null);
       state.v = new fluid.Buffer(w, h, null);
@@ -451,7 +451,8 @@ if (this.self !== undefined) {
         state.broadcast = new fluid.Buffer(w, h, args.broadcast);
         state.reply = new fluid.Buffer(w, h, args.reply);
       }
-      state.temp = new fluid.Buffer(state.bufferRect.w, state.bufferRect.h);
+      // Overallocate to allow for varying iteration counts.
+      state.temp = new fluid.Buffer(w, h);
     },
     "updateVelocity": function(msg) {
       var args = msg.args;
@@ -470,9 +471,12 @@ if (this.self !== undefined) {
       var args = msg.args;
       state.inp.data = args.inp;
       state.temp.data = args.out;
+
+      var policy = new fluid.TorusShardingPolicy(state.w, state.h, args.params.iterations - 1, state.shards);
       fluid.jacobiRegion(state.inp, state.fb, state.temp, args.params,
-                         state.bufferRect.x, state.bufferRect.y,
-                         state.bufferRect.w, state.bufferRect.h);
+                         policy.bufferX(state.workerID), policy.bufferY(state.workerID),
+                         policy.bufferW, policy.bufferH);
+
       self.postMessage({
         uid: msg.uid,
         out: args.out,
@@ -484,14 +488,17 @@ if (this.self !== undefined) {
     "shardedJacobiRO": function(msg) {
       var begin = performance.now();
       var args = msg.args;
+
+      var policy = new fluid.TorusShardingPolicy(state.w, state.h, args.params.iterations - 1, state.shards);
       fluid.jacobiRegion(state.broadcast, state.fb, state.temp, args.params,
-                         state.bufferRect.x, state.bufferRect.y,
-                         state.bufferRect.w, state.bufferRect.h);
+                         policy.bufferX(state.workerID), policy.bufferY(state.workerID),
+                         policy.bufferW, policy.bufferH);
+
       state.reply.copySubrect(
         state.temp,
-        state.padW, state.padH,
-        state.shardRect.w, state.shardRect.h,
-        state.shardRect.x, state.shardRect.y
+        policy.padW, policy.padH,
+        policy.shardW, policy.shardH,
+        policy.shardX(state.workerID), policy.shardY(state.workerID)
       );
       self.postMessage({
         uid: msg.uid,
@@ -521,22 +528,20 @@ if (this.self !== undefined) {
 
     "initSAB": function(msg) {
       var args = msg.args;
-      var w = args.fullRect.w;
-      var h = args.fullRect.h;
+      var w = args.w;
+      var h = args.h;
 
+      state.w = args.w;
+      state.h = args.h;
       state.workerID = args.workerID;
-      state.padW = args.padW;
-      state.padH = args.padH;
-      state.fullRect = args.fullRect;
-      state.shardRect = args.shardRect;
-      state.bufferRect = args.bufferRect;
+      state.shards = args.shards;
 
       state.broadcast = new fluid.Buffer(w, h, args.broadcast);
       state.reply = new fluid.Buffer(w, h, args.reply);
       state.u = new fluid.Buffer(w, h, args.u);
       state.v = new fluid.Buffer(w, h, args.v);
 
-      state.temp = new fluid.Buffer(state.bufferRect.w, state.bufferRect.h);
+      state.temp = new fluid.Buffer(w, h);
 
       // TODO do red black and eliminate feedback buffer.
       state.fb  = new fluid.Buffer(w, h);
@@ -578,15 +583,16 @@ if (this.self !== undefined) {
             a: -1,
             invB: 1/4,
           };
-          fluid.jacobiRegion(state.broadcast, state.fb, state.temp,
-                             jparams,
-                             state.bufferRect.x, state.bufferRect.y,
-                             state.bufferRect.w, state.bufferRect.h);
+          var policy = new fluid.TorusShardingPolicy(state.w, state.h, jparams.iterations - 1, state.shards);
+          fluid.jacobiRegion(state.broadcast, state.fb, state.temp, jparams,
+                             policy.bufferX(state.workerID), policy.bufferY(state.workerID),
+                             policy.bufferW, policy.bufferH);
+
           state.reply.copySubrect(
             state.temp,
-            state.padW, state.padH,
-            state.shardRect.w, state.shardRect.h,
-            state.shardRect.x, state.shardRect.y
+            policy.padW, policy.padH,
+            policy.shardW, policy.shardH,
+            policy.shardX(state.workerID), policy.shardY(state.workerID)
           );
         } else {
           break;

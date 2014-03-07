@@ -414,16 +414,17 @@
 
 
   var remoteProxy = function(w, h, shards, readonly) {
-    // TODO plumb through horizon.
-    this.policy = new fluid.TorusShardingPolicy(w, h, 29, shards);
+    this.w = w;
+    this.h = h;
+    this.shardCount = shards;
 
     this.shards = [];
     this.shardOut = [];
 
     var initArgs = {
-      padW: this.policy.padW,
-      padH: this.policy.padH,
-      fullRect: this.policy.fullRect()
+      w: w,
+      h: h,
+      shards: shards,
     };
     var initTransfer = [];
 
@@ -437,15 +438,13 @@
       initTransfer.push(this.reply.data.buffer);
     }
 
-    for (var i = 0; i < this.policy.shards; i++) {
+    for (var i = 0; i < this.shardCount; i++) {
       var shard = new RPCWorker(new Worker('simulation.js'));
       initArgs.workerID = i;
-      initArgs.shardRect = this.policy.shardRect(i);
-      initArgs.bufferRect = this.policy.bufferRect(i);
       shard.rpc("init", initArgs, undefined, initTransfer);
       this.shards.push(shard);
-      // Note image buffers will be expanded to a containing power-of-two size.
-      this.shardOut.push(new fluid.Buffer(this.policy.bufferW, this.policy.bufferH));
+      // Overallocate to deal with varying iteration counts.
+      this.shardOut.push(new fluid.Buffer(w, h));
     }
 
     this.readonly = readonly;
@@ -512,6 +511,8 @@
       printStats("Delta", deltatime);
     };
 
+    var policy = new fluid.TorusShardingPolicy(proxy.w, proxy.h, jparams.iterations - 1, proxy.shards.length);
+
     if (this.shards.length > 1) {
       return new Promise(function(resolve) {
         if (proxy.readonly) {
@@ -548,7 +549,7 @@
                 },
                 function(result) {
                   temp.data = result.out;
-                  proxy.policy.gatherShardOutput(i, temp, out);
+                  policy.gatherShardOutput(i, temp, out);
                   //shardDone(performance.now() - begin, result.time);
                   remaining -= 1;
                   if (remaining <= 0) {
@@ -594,9 +595,10 @@
   };
 
 
-  var sabProxy = function(w, h, shards, readonly) {
-    // TODO plumb through horizon.
-    this.policy = new fluid.TorusShardingPolicy(w, h, 29, shards);
+  var sabProxy = function(w, h, shards) {
+    this.w = w;
+    this.h = h;
+    this.shardCount = shards;
 
     this.shards = [];
 
@@ -621,23 +623,21 @@
 
     this.control.mutexLock(fluid.control.lock);
     this.controlMem[fluid.control.command] = fluid.control.INIT;
-    this.controlMem[fluid.control.running] = this.policy.shards;
+    this.controlMem[fluid.control.running] = this.shardCount;
     this.control.mutexUnlock(fluid.control.lock);
 
     this.main = new RPCWorker(new Worker('simulation.js'));
     this.main.rpc("initMain", {control: this.control}, undefined, [this.control]);
 
-    for (var i = 0; i < this.policy.shards; i++) {
+    for (var i = 0; i < this.shardCount; i++) {
       var shard = new RPCWorker(new Worker('simulation.js'));
       shard.rpc(
         "initSAB",
         {
+          w: this.w,
+          h: this.h,
           workerID: i,
-          padW: this.policy.padW,
-          padH: this.policy.padH,
-          fullRect: this.policy.fullRect(),
-          shardRect: this.policy.shardRect(i),
-          bufferRect: this.policy.bufferRect(i),
+          shards: this.shardCount,
           broadcast: this.broadcast.data,
           reply: this.reply.data,
           u: this.u.data,
@@ -819,7 +819,7 @@
 
       genNoise(state);
 
-      for (var i = 0; i < 10; i++) {
+      for (var i = 0; i < 100; i++) {
         splat(state);
       }
 
