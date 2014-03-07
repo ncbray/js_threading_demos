@@ -429,7 +429,6 @@
       initArgs.broadcast = this.broadcast.data;
       initTransfer.push(this.broadcast.data.buffer);
 
-
       this.reply = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
       initArgs.reply = this.reply.data;
       initTransfer.push(this.reply.data.buffer);
@@ -592,6 +591,89 @@
   };
 
 
+  var sabProxy = function(w, h, shards, readonly) {
+    // TODO plumb through horizon.
+    this.policy = new fluid.TorusShardingPolicy(w, h, 29, shards);
+
+    this.shards = [];
+
+    this.broadcast = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
+    this.reply = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
+    this.u = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
+    this.v = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
+
+    for (var i = 0; i < this.policy.shards; i++) {
+      var worker = new Worker('simulation.js');
+      var shard = new RPCWorker(worker);
+      shard.rpc(
+        "initSAB",
+        {
+          padW: this.policy.padW,
+          padH: this.policy.padH,
+          fullRect: this.policy.fullRect(),
+          shardRect: this.policy.shardRect(i),
+          bufferRect: this.policy.bufferRect(i),
+          broadcast: this.broadcast.data,
+          reply: this.reply.data,
+          u: this.u.data,
+          v: this.v.data,
+        },
+        undefined,
+        [
+          this.broadcast.data.buffer,
+          this.reply.data.buffer,
+          this.u.data.buffer,
+          this.v.data.buffer
+        ]
+      );
+      this.shards.push(shard);
+    }
+  };
+
+  sabProxy.prototype = new genericProxy();
+
+  sabProxy.prototype.updateVelocity = function(u, v) {
+    if (!this.alive) throw "dead proxy";
+    this.u.data.set(u.data);
+    this.v.data.set(v.data);
+  };
+
+  sabProxy.prototype.jacobi = function(inp, out, jparams) {
+    if (!this.alive) throw "dead proxy";
+    var proxy = this;
+    return new Promise(function(resolve) {
+      proxy.broadcast.copy(inp);
+      var remaining = proxy.shards.length;
+      for (var i = 0; i < remaining; i++) {
+        (function(i) {
+          proxy.shards[i].rpc(
+            "shardedJacobiRO",
+            {
+              params: jparams
+            },
+            function(result) {
+              remaining -= 1;
+              if (remaining <= 0) {
+                out.copy(proxy.reply);
+                resolve();
+              }
+            }
+          );
+        })(i);
+      }
+    });
+  };
+
+  sabProxy.prototype.shutdown = function() {
+    if (!this.alive) throw "dead proxy";
+    this.alive = false;
+    for (var i = 0; i < this.shards.length; i++) {
+      this.shards[i].terminate();
+    }
+  };
+
+
+
   var syncConfig = function() {
     var c = document.getElementsByTagName("canvas")[0];
 
@@ -639,9 +721,10 @@
     }
 
     var readonly = config.proxy == "readonly";
-    var shared = config.proxy == "shared";
 
-    if (config.proxy == "remote" || readonly || shared) {
+    if (config.proxy == "shared") {
+      state.proxy = new sabProxy(state.width, state.height, config.shards);
+    } else if (config.proxy == "remote" || readonly) {
       state.proxy = new remoteProxy(state.width, state.height, config.shards, readonly);
     } else {
       state.proxy = new localProxy(state.width, state.height);

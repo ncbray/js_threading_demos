@@ -426,6 +426,29 @@ if (this.self !== undefined) {
         time: performance.now() - begin
       });
     },
+
+    "initSAB": function(msg) {
+      var args = msg.args;
+      var w = args.fullRect.w;
+      var h = args.fullRect.h;
+
+      state.padW = args.padW;
+      state.padH = args.padH;
+      state.fullRect = args.fullRect;
+      state.shardRect = args.shardRect;
+      state.bufferRect = args.bufferRect;
+
+      state.broadcast = new fluid.Buffer(w, h, args.broadcast);
+      state.reply = new fluid.Buffer(w, h, args.reply);
+      state.u = new fluid.Buffer(w, h, args.u);
+      state.v = new fluid.Buffer(w, h, args.v);
+
+      state.temp = new fluid.Buffer(state.bufferRect.w, state.bufferRect.h);
+
+      // TODO do red black and eliminate feedback buffer.
+      state.fb  = new fluid.Buffer(w, h);
+    },
+
   };
 
   self.addEventListener('message', function(e) {
