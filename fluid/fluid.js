@@ -315,6 +315,9 @@
     this.alive = true;
   };
 
+  genericProxy.prototype.init = function() {
+  };
+
   genericProxy.prototype.updateVelocity = function(u, v) {
     if (!this.alive) throw "dead proxy";
     this.u = u;
@@ -435,8 +438,8 @@
     }
 
     for (var i = 0; i < this.policy.shards; i++) {
-      var worker = new Worker('simulation.js');
-      var shard = new RPCWorker(worker);
+      var shard = new RPCWorker(new Worker('simulation.js'));
+      initArgs.workerID = i;
       initArgs.shardRect = this.policy.shardRect(i);
       initArgs.bufferRect = this.policy.bufferRect(i);
       shard.rpc("init", initArgs, undefined, initTransfer);
@@ -602,12 +605,34 @@
     this.u = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
     this.v = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
 
+    this.control = new ArrayBuffer(fluid.control.size, true);
+    this.control.mutexInit(fluid.control.lock);
+    this.control.condInit(fluid.control.workerWait);
+    this.control.condInit(fluid.control.workerSync);
+    this.control.condInit(fluid.control.mainWait);
+    this.controlMem = new Uint8Array(this.control);
+    this.controlFloat = new Float32Array(this.control);
+  };
+
+  sabProxy.prototype = new genericProxy();
+
+  sabProxy.prototype.init = function() {
+    var proxy = this;
+
+    this.control.mutexLock(fluid.control.lock);
+    this.controlMem[fluid.control.command] = fluid.control.INIT;
+    this.controlMem[fluid.control.running] = this.policy.shards;
+    this.control.mutexUnlock(fluid.control.lock);
+
+    this.main = new RPCWorker(new Worker('simulation.js'));
+    this.main.rpc("initMain", {control: this.control}, undefined, [this.control]);
+
     for (var i = 0; i < this.policy.shards; i++) {
-      var worker = new Worker('simulation.js');
-      var shard = new RPCWorker(worker);
+      var shard = new RPCWorker(new Worker('simulation.js'));
       shard.rpc(
         "initSAB",
         {
+          workerID: i,
           padW: this.policy.padW,
           padH: this.policy.padH,
           fullRect: this.policy.fullRect(),
@@ -617,20 +642,20 @@
           reply: this.reply.data,
           u: this.u.data,
           v: this.v.data,
+          control: this.control,
         },
         undefined,
         [
           this.broadcast.data.buffer,
           this.reply.data.buffer,
           this.u.data.buffer,
-          this.v.data.buffer
+          this.v.data.buffer,
+          this.control,
         ]
       );
       this.shards.push(shard);
     }
   };
-
-  sabProxy.prototype = new genericProxy();
 
   sabProxy.prototype.updateVelocity = function(u, v) {
     if (!this.alive) throw "dead proxy";
@@ -641,6 +666,15 @@
   sabProxy.prototype.jacobi = function(inp, out, jparams) {
     if (!this.alive) throw "dead proxy";
     var proxy = this;
+
+    return Promise.resolve(undefined).then(function() {
+      proxy.broadcast.copy(inp);
+      return proxy.sendCommand(fluid.control.JACOBI);
+    }).then(function() {
+      out.copy(proxy.reply);
+    });
+
+
     return new Promise(function(resolve) {
       proxy.broadcast.copy(inp);
       var remaining = proxy.shards.length;
@@ -664,12 +698,58 @@
     });
   };
 
+  sabProxy.prototype.sendCommand = function(cmd) {
+    var proxy = this;
+    return new Promise(function(resolve) {
+      if (cmd == fluid.control.JACOBI) {
+        //var begin = performance.now();
+        proxy.main.rpc(
+          "jacobiMain",
+          {},
+          function(result) {
+            //var outside = performance.now() - begin;
+            //console.log(outside, result.time, outside - result.time);
+            resolve();
+          }
+        )
+      } else if (cmd == fluid.control.QUIT) {
+        console.log("Sending quit.");
+        proxy.main.rpc(
+          "quitMain",
+          {},
+          function() {
+            console.log("Quit done.");
+            resolve();
+          }
+        )
+      } else {
+        console.error(cmd);
+        throw cmd;
+      }
+    });
+  };
+
   sabProxy.prototype.shutdown = function() {
     if (!this.alive) throw "dead proxy";
     this.alive = false;
-    for (var i = 0; i < this.shards.length; i++) {
-      this.shards[i].terminate();
-    }
+
+    var proxy = this;
+    return Promise.resolve(undefined).then(function() {
+      return proxy.sendCommand(fluid.control.QUIT);
+    }).then(function() {
+      console.log("terminating.");
+      for (var i = 0; i < proxy.shards.length; i++) {
+        proxy.shards[i].terminate();
+      }
+      proxy.main.terminate();
+
+      console.log("destroying.");
+
+      proxy.control.condDestroy(fluid.control.mainWait);
+      proxy.control.condDestroy(fluid.control.workerSync);
+      proxy.control.condDestroy(fluid.control.workerWait);
+      proxy.control.mutexDestroy(fluid.control.lock);
+    });
   };
 
 
@@ -713,31 +793,38 @@
 
     state.buffer = state.ctx.createImageData(state.width, state.height);
 
-    if (state.proxy) {
-      state.proxy.shutdown();
-    }
-    if (state.pending) {
-      state.pending.cancel();
-    }
 
     var readonly = config.proxy == "readonly";
 
-    if (config.proxy == "shared") {
-      state.proxy = new sabProxy(state.width, state.height, config.shards);
-    } else if (config.proxy == "remote" || readonly) {
-      state.proxy = new remoteProxy(state.width, state.height, config.shards, readonly);
-    } else {
-      state.proxy = new localProxy(state.width, state.height);
-    }
-    state.proxy.updateVelocity(state.u, state.v);
+    return Promise.resolve(undefined).then(function() {
+      if (state.pending) {
+        state.pending.cancel();
+      }
 
-    genNoise(state);
+      if (state.proxy) {
+        return state.proxy.shutdown();
+      }
+    }).then(function() {
+      if (config.proxy == "shared") {
+        state.proxy = new sabProxy(state.width, state.height, config.shards);
+      } else if (config.proxy == "remote" || readonly) {
+        state.proxy = new remoteProxy(state.width, state.height, config.shards, readonly);
+      } else {
+        state.proxy = new localProxy(state.width, state.height);
+      }
+    }).then(function() {
+      return state.proxy.init();
+    }).then(function() {
+      state.proxy.updateVelocity(state.u, state.v);
 
-    for (var i = 0; i < 10; i++) {
-      splat(state);
-    }
+      genNoise(state);
 
-    runner.scheduleFrame();
+      for (var i = 0; i < 10; i++) {
+        splat(state);
+      }
+
+      runner.scheduleFrame();
+    });
   };
 
   exports.runFluid = function() {

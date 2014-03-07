@@ -337,7 +337,8 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
     return {x: this.bufferX(i), y: this.bufferY(i), w: this.bufferW, h: this.bufferH};
   };
 
-  exports.fluid = {};
+  var fluid = {};
+  exports.fluid = fluid;
   exports.fluid.advect = advect;
   exports.fluid.calcDiv = calcDiv;
   exports.fluid.subtractPressure = subtractPressure;
@@ -350,6 +351,77 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
   exports.fluid.Buffer = Buffer;
 
   exports.fluid.ceilPOT = ceilPOT;
+
+
+  exports.fluid.controlStatusString = function(controlMem) {
+      return controlMem[fluid.control.waiting] + "/" + controlMem[fluid.control.waking] + "/" + controlMem[fluid.control.running];
+  };
+
+  exports.fluid.fenceRaw = function(control, controlMem) {
+    if (controlMem[fluid.control.running] > 0 || controlMem[fluid.control.waking] > 0) {
+      //console.log("Fence: waiting for notification.");
+      control.condWait(fluid.control.mainWait, fluid.control.lock);
+    } else if (controlMem[fluid.control.waiting] <= 0) {
+      console.log("Fence: anomoly detected - no workers: " + fluid.controlStatusString(controlMem));
+    } else {
+      //console.log("Fence: is NOP.")
+    }
+  };
+
+  exports.fluid.fence = function(control, controlMem) {
+    console.log("Locking.");
+    control.mutexLock(fluid.control.lock);
+    fluid.fenceRaw(control, controlMem);
+    console.log("Unlocking.");
+    control.mutexUnlock(fluid.control.lock);
+    console.log("Done.");
+  };
+
+  exports.fluid.sendCommand = function(cmd, control, controlMem) {
+    //console.log("Trying to send " + cmd);
+    control.mutexLock(fluid.control.lock);
+    //console.log("Got lock. " + fluid.controlStatusString(controlMem));
+
+    // Should be a NOP except (possibly) for the first call to sendCommand.
+    fluid.fenceRaw(control, controlMem);
+
+    controlMem[fluid.control.command] = cmd;
+
+    // Wake up the workers.
+    var waiting = controlMem[fluid.control.waiting];
+    controlMem[fluid.control.waiting] = 0;
+    controlMem[fluid.control.waking] = waiting;
+
+    //console.log("Broadcasting. " + fluid.controlStatusString(controlMem));
+    control.condBroadcast(fluid.control.workerWait);
+
+    // Wait for the workers to finish.
+    fluid.fenceRaw(control, controlMem);
+
+    //console.log("Unlocking.");
+    control.mutexUnlock(fluid.control.lock);
+    //console.log("Done.");
+  };
+
+
+  exports.fluid.control = {
+    lock: 0,
+    workerWait: 64,
+    workerSync: 128,
+    mainWait: 192,
+
+    waiting: 256,
+    waking: 257,
+    running: 258,
+    command: 259,
+    args: 260,
+
+    size: 512,
+
+    INIT: 0,
+    JACOBI: 1,
+    QUIT: 2
+  };
 
 })(this.window || this.self);
 
@@ -427,11 +499,32 @@ if (this.self !== undefined) {
       });
     },
 
+    "initMain": function(msg) {
+      var args = msg.args;
+      state.control = args.control;
+      state.controlMem = new Uint8Array(args.control);
+      state.controlFloat = new Float32Array(args.control);
+    },
+
+    "jacobiMain": function(msg) {
+      var begin = performance.now();
+      fluid.sendCommand(fluid.control.JACOBI, state.control, state.controlMem);
+      self.postMessage({uid: msg.uid, time: performance.now() - begin});
+    },
+
+    "quitMain": function(msg) {
+      var begin = performance.now();
+      fluid.sendCommand(fluid.control.QUIT, state.control, state.controlMem);
+      console.log("quit " + (performance.now() - begin));
+      self.postMessage({uid: msg.uid});
+    },
+
     "initSAB": function(msg) {
       var args = msg.args;
       var w = args.fullRect.w;
       var h = args.fullRect.h;
 
+      state.workerID = args.workerID;
       state.padW = args.padW;
       state.padH = args.padH;
       state.fullRect = args.fullRect;
@@ -447,6 +540,68 @@ if (this.self !== undefined) {
 
       // TODO do red black and eliminate feedback buffer.
       state.fb  = new fluid.Buffer(w, h);
+
+      var control = args.control;
+      var controlMem = new Uint8Array(control);
+      var controlFloat = new Float32Array(control);
+
+      var statusString = function() {
+        return state.workerID + ": " + fluid.controlStatusString(controlMem);
+      };
+
+      while (true) {
+        //console.log("loop " + state.workerID);
+        control.mutexLock(fluid.control.lock);
+        //console.log("locked " + statusString());
+        controlMem[fluid.control.running] -= 1;
+        controlMem[fluid.control.waiting] += 1;
+        if (controlMem[fluid.control.running] <= 0 && controlMem[fluid.control.waking] <= 0) {
+          // Notify we've fenced.
+          //console.log("Signaling fence.");
+          control.condSignal(fluid.control.mainWait);
+        }
+
+        //console.log("waiting " + statusString());
+        control.condWait(fluid.control.workerWait, fluid.control.lock);
+        //console.log("woken " + statusString());
+        controlMem[fluid.control.waking] -= 1;
+        controlMem[fluid.control.running] += 1;
+        var cmd = controlMem[fluid.control.command];
+        control.mutexUnlock(fluid.control.lock);
+
+        //console.log("command " + cmd);
+
+        if (cmd == fluid.control.JACOBI) {
+          // HACK hardwire parameters.
+          var jparams = {
+            iterations: 30,
+            a: -1,
+            invB: 1/4,
+          };
+          fluid.jacobiRegion(state.broadcast, state.fb, state.temp,
+                             jparams,
+                             state.bufferRect.x, state.bufferRect.y,
+                             state.bufferRect.w, state.bufferRect.h);
+          state.reply.copySubrect(
+            state.temp,
+            state.padW, state.padH,
+            state.shardRect.w, state.shardRect.h,
+            state.shardRect.x, state.shardRect.y
+          );
+        } else {
+          break;
+        }
+      }
+
+      control.mutexLock(fluid.control.lock);
+      console.log("Saying goodbye. " + statusString());
+      controlMem[fluid.control.running] -= 1;
+      if (controlMem[fluid.control.running] <= 0 && controlMem[fluid.control.waking] <= 0) {
+        // Notify we've fenced.
+        console.log("Signaling fence.");
+        control.condSignal(fluid.control.mainWait);
+      }
+      control.mutexUnlock(fluid.control.lock);
     },
 
   };
