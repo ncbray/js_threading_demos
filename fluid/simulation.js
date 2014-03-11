@@ -74,9 +74,9 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
   };
 
   var jacobiIteration = function(inp, fb, out, a, invB, x, y, w, h) {
-    for (var j = 0; j < h; j++) {
-      for (var i = 0; i < w; i++) {
-        var value = (a * inp.get(x + i, y + j) +
+    for (var j = y; j < y+h; j++) {
+      for (var i = x; i < x+w; i++) {
+        var value = (a * inp.get(i, j) +
                  fb.get(i-1, j) +
                  fb.get(i+1, j) +
                  fb.get(i, j-1) +
@@ -88,43 +88,37 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
   };
 
   var firstJacobiIteration = function(inp, out, a, invB, x, y, w, h) {
-    for (var j = 0; j < h; j++) {
-      for (var i = 0; i < w; i++) {
-        var value = a * invB * inp.get(x + i, y + j);
+    for (var j = y; j < y+h; j++) {
+      for (var i = x; i < x+w; i++) {
+        var value = a * invB * inp.get(i, j);
         out.set(i, j, value);
       }
     }
   };
 
-  var redBlackIteration = function(inp, out, a, invB, x, y, w, h) {
+  var firstRedBlackIteration = function(inp, out, a, invB, x, y, w, h, color) {
+    for (var j = y; j < y+h; j++) {
+      for (var i = x; i < x+w; i++) {
+        if ((i + j) & 1 != color) continue;
+        var value = a * invB * inp.get(i, j);
+        out.set(i, j, value);
+      }
+    }
+  };
+
+  var redBlackIteration = function(inp, out, a, invB, x, y, w, h, color) {
     // TODO adaptive scale
     var scale = 1.0;
 
-    for (var j = 0; j < h; j++) {
-      for (var i = 0; i < w; i++) {
-        if ((i + j) & 1 != 0) continue;
-        var value = (a * inp.get(x + i, y + j) +
+    for (var j = y; j < y+h; j++) {
+      for (var i = x; i < x+w; i++) {
+        if ((i + j) & 1 != color) continue;
+        var value = (a * inp.get(i, j) +
                  out.get(i-1, j) +
                  out.get(i+1, j) +
                  out.get(i, j-1) +
                  out.get(i, j+1)
         ) * invB;
-        //out.set(i, j, value);
-        var current = out.get(i, j, value);
-        out.set(i, j, value * scale + current * (1 - scale));
-      }
-    }
-
-    for (var j = 0; j < h; j++) {
-      for (var i = 0; i < w; i++) {
-        if ((i + j) & 1 != 1) continue;
-        var value = (a * inp.get(x + i, y + j) +
-                 out.get(i-1, j) +
-                 out.get(i+1, j) +
-                 out.get(i, j-1) +
-                 out.get(i, j+1)
-        ) * invB;
-        //out.set(i, j, value);
         var current = out.get(i, j, value);
         out.set(i, j, value * scale + current * (1 - scale));
       }
@@ -148,9 +142,32 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
         jacobiIteration(inp, fb, out, a, invB, x, y, w, h);
       }
     } else {
-      for (var k = 0; k < params.iterations / 2; k++) {
-        redBlackIteration(inp, out, a, invB, x, y, w, h);
+      var color = 0;
+      firstRedBlackIteration(inp, out, a, invB, x, y, w, h, color);
+      color = 1 - color;
+      for (var k = 0; k < params.iterations; k++) {
+        redBlackIteration(inp, out, a, invB, x, y, w, h, color);
+        color = 1 - color;
       }
+    }
+  };
+
+  var jacobiRegionSync = function(inp, fb, out, params, x, y, w, h, control, controlMem) {
+    var a = params.a;
+    var invB = params.invB;
+
+    var temp = fb;
+    fb = out;
+    out = temp;
+    firstJacobiIteration(inp, out, a, invB, x, y, w, h);
+
+    for (var k = 1; k < params.iterations; k++) {
+      var temp = fb;
+      fb = out;
+      out = temp;
+
+      fluid.syncWorkers(control, controlMem);
+      jacobiIteration(inp, fb, out, a, invB, x, y, w, h);
     }
   };
 
@@ -322,7 +339,9 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
   };
 
   TorusShardingPolicy.prototype.gatherShardOutput = function(i, buffer, out) {
-    out.copySubrect(buffer, this.padW, this.padH, this.shardW, this.shardH, this.shardX(i), this.shardY(i));
+    var x = this.shardX(i);
+    var y = this.shardY(i);
+    out.copySubrect(buffer, x, y, this.shardW, this.shardH, x, y);
   };
 
   TorusShardingPolicy.prototype.fullRect = function() {
@@ -345,6 +364,7 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
   exports.fluid.zero = zero;
   exports.fluid.jacobiIteration = jacobiIteration;
   exports.fluid.jacobiRegion = jacobiRegion;
+  exports.fluid.jacobiRegionSync = jacobiRegionSync;
   exports.fluid.jacobi = jacobi;
   exports.fluid.TorusShardingPolicy = TorusShardingPolicy;
 
@@ -403,6 +423,30 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
     //console.log("Done.");
   };
 
+  exports.fluid.syncWorkers = function(control, controlMem) {
+    control.mutexLock(fluid.control.lock);
+
+    controlMem[fluid.control.running] -= 1;
+    controlMem[fluid.control.waiting] += 1;
+
+    if (controlMem[fluid.control.running] > 0 || controlMem[fluid.control.waking] > 0) {
+      //console.log("Waiting for sync " + fluid.controlStatusString(controlMem));
+      control.condWait(fluid.control.workerWait, fluid.control.lock);
+    } else {
+      var temp = controlMem[fluid.control.waiting];
+      controlMem[fluid.control.waiting] = 0;
+      controlMem[fluid.control.waking] = temp;
+      //console.log("Broadcasting " + fluid.controlStatusString(controlMem));
+      control.condBroadcast(fluid.control.workerWait);
+    }
+
+    controlMem[fluid.control.waking] -= 1;
+    controlMem[fluid.control.running] += 1;
+
+    //console.log("Sync done " + fluid.controlStatusString(controlMem));
+    control.mutexUnlock(fluid.control.lock);
+  };
+
 
   exports.fluid.control = {
     lock: 0,
@@ -415,6 +459,10 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
     running: 258,
     command: 259,
     args: 260,
+
+    jacobiA: 260,
+    jacobiInvB: 264,
+    jacobiIterations: 268,
 
     size: 512,
 
@@ -494,12 +542,8 @@ if (this.self !== undefined) {
                          policy.bufferX(state.workerID), policy.bufferY(state.workerID),
                          policy.bufferW, policy.bufferH);
 
-      state.reply.copySubrect(
-        state.temp,
-        policy.padW, policy.padH,
-        policy.shardW, policy.shardH,
-        policy.shardX(state.workerID), policy.shardY(state.workerID)
-      );
+      policy.gatherShardOutput(state.workerID, state.temp, state.reply);
+
       self.postMessage({
         uid: msg.uid,
         time: performance.now() - begin
@@ -515,6 +559,13 @@ if (this.self !== undefined) {
 
     "jacobiMain": function(msg) {
       var begin = performance.now();
+
+      state.control.mutexLock(fluid.control.lock);
+      state.controlFloat[fluid.control.jacobiA >> 2] = msg.args.a;
+      state.controlFloat[fluid.control.jacobiInvB >> 2] = msg.args.invB;
+      state.controlMem[fluid.control.jacobiIterations] = msg.args.iterations;
+      state.control.mutexUnlock(fluid.control.lock);
+
       fluid.sendCommand(fluid.control.JACOBI, state.control, state.controlMem);
       self.postMessage({uid: msg.uid, time: performance.now() - begin});
     },
@@ -537,6 +588,7 @@ if (this.self !== undefined) {
       state.shards = args.shards;
 
       state.broadcast = new fluid.Buffer(w, h, args.broadcast);
+      state.fb = new fluid.Buffer(w, h, args.fb);
       state.reply = new fluid.Buffer(w, h, args.reply);
       state.u = new fluid.Buffer(w, h, args.u);
       state.v = new fluid.Buffer(w, h, args.v);
@@ -544,7 +596,7 @@ if (this.self !== undefined) {
       state.temp = new fluid.Buffer(w, h);
 
       // TODO do red black and eliminate feedback buffer.
-      state.fb  = new fluid.Buffer(w, h);
+      state.localFB  = new fluid.Buffer(w, h);
 
       var control = args.control;
       var controlMem = new Uint8Array(control);
@@ -577,23 +629,28 @@ if (this.self !== undefined) {
         //console.log("command " + cmd);
 
         if (cmd == fluid.control.JACOBI) {
-          // HACK hardwire parameters.
           var jparams = {
-            iterations: 30,
-            a: -1,
-            invB: 1/4,
+            a: controlFloat[fluid.control.jacobiA >> 2],
+            invB: controlFloat[fluid.control.jacobiInvB >> 2],
+            iterations: controlMem[fluid.control.jacobiIterations]
           };
-          var policy = new fluid.TorusShardingPolicy(state.w, state.h, jparams.iterations - 1, state.shards);
-          fluid.jacobiRegion(state.broadcast, state.fb, state.temp, jparams,
-                             policy.bufferX(state.workerID), policy.bufferY(state.workerID),
-                             policy.bufferW, policy.bufferH);
 
-          state.reply.copySubrect(
-            state.temp,
-            policy.padW, policy.padH,
-            policy.shardW, policy.shardH,
-            policy.shardX(state.workerID), policy.shardY(state.workerID)
-          );
+          if (false) {
+            var policy = new fluid.TorusShardingPolicy(state.w, state.h, jparams.iterations - 1, state.shards);
+            fluid.jacobiRegion(state.broadcast, state.localFB, state.temp, jparams,
+                               policy.bufferX(state.workerID), policy.bufferY(state.workerID),
+                               policy.bufferW, policy.bufferH);
+            policy.gatherShardOutput(state.workerID, state.temp, state.reply);
+          } else {
+            var policy = new fluid.TorusShardingPolicy(state.w, state.h, 0, state.shards);
+            fluid.jacobiRegionSync(state.broadcast, state.fb, state.reply, jparams,
+                                   policy.bufferX(state.workerID), policy.bufferY(state.workerID),
+                                   policy.bufferW, policy.bufferH,
+                                   control, controlMem);
+
+            //policy.gatherShardOutput(state.workerID, state.temp, state.reply);
+          }
+
         } else {
           break;
         }

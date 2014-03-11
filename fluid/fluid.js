@@ -603,6 +603,7 @@
     this.shards = [];
 
     this.broadcast = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
+    this.fb = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
     this.reply = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
     this.u = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
     this.v = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
@@ -639,6 +640,7 @@
           workerID: i,
           shards: this.shardCount,
           broadcast: this.broadcast.data,
+          fb: this.fb.data,
           reply: this.reply.data,
           u: this.u.data,
           v: this.v.data,
@@ -647,6 +649,7 @@
         undefined,
         [
           this.broadcast.data.buffer,
+          this.fb.data.buffer,
           this.reply.data.buffer,
           this.u.data.buffer,
           this.v.data.buffer,
@@ -669,7 +672,7 @@
 
     return Promise.resolve(undefined).then(function() {
       proxy.broadcast.copy(inp);
-      return proxy.sendCommand(fluid.control.JACOBI);
+      return proxy.sendCommand(fluid.control.JACOBI, jparams);
     }).then(function() {
       out.copy(proxy.reply);
     });
@@ -698,14 +701,14 @@
     });
   };
 
-  sabProxy.prototype.sendCommand = function(cmd) {
+  sabProxy.prototype.sendCommand = function(cmd, args) {
     var proxy = this;
     return new Promise(function(resolve) {
       if (cmd == fluid.control.JACOBI) {
         //var begin = performance.now();
         proxy.main.rpc(
           "jacobiMain",
-          {},
+          args,
           function(result) {
             //var outside = performance.now() - begin;
             //console.log(outside, result.time, outside - result.time);
@@ -716,7 +719,7 @@
         console.log("Sending quit.");
         proxy.main.rpc(
           "quitMain",
-          {},
+          args,
           function() {
             console.log("Quit done.");
             resolve();
@@ -735,7 +738,7 @@
 
     var proxy = this;
     return Promise.resolve(undefined).then(function() {
-      return proxy.sendCommand(fluid.control.QUIT);
+      return proxy.sendCommand(fluid.control.QUIT, {});
     }).then(function() {
       console.log("terminating.");
       for (var i = 0; i < proxy.shards.length; i++) {
