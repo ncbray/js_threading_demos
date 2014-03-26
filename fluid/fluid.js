@@ -19,9 +19,6 @@
   // http://www.dgp.toronto.edu/people/stam/reality/Research/pdf/GDC03.pdf
 
   var diffuse = function(proxy, inp, out, dx, diff, drag, dt) {
-    // The input is a good inital approximation of the output.
-    out.copy(inp);
-
     var denomA = dt * diff;
     if (denomA == 0) {
       return;
@@ -476,6 +473,9 @@
       this.v.data.set(v.data);
       // TODO simulate event send.
     } else {
+      // Local methods will also need access to the velocity fields.
+      this.u = u;
+      this.v = v;
       for (var i = 0; i < this.shards.length; i++) {
         this.shards[i].rpc(
           "updateVelocity",
@@ -485,9 +485,6 @@
           }
         );
       }
-      // Local methods will also need access to the velocity fields.
-      this.u = u;
-      this.v = v;
     }
   };
 
@@ -611,10 +608,18 @@
     this.control = new ArrayBuffer(fluid.control.size, true);
     this.control.mutexInit(fluid.control.lock);
     this.control.condInit(fluid.control.workerWait);
-    this.control.condInit(fluid.control.workerSync);
     this.control.condInit(fluid.control.mainWait);
+    this.control.barrierInit(fluid.control.workerBarrier);
+    this.control.mutexInit(fluid.control.barrierMutex);
+    this.control.condInit(fluid.control.barrierSemiphore);
+
+
     this.controlMem = new Uint8Array(this.control);
     this.controlFloat = new Float32Array(this.control);
+    this.controlUint = new Uint32Array(this.control);
+
+    this.controlUint[fluid.control.barrierMax>>2] = shards;
+    this.controlUint[fluid.control.barrierCurrent>>2] = 0;
   };
 
   sabProxy.prototype = new genericProxy();
@@ -629,6 +634,8 @@
 
     this.main = new RPCWorker(new Worker('simulation.js'));
     this.main.rpc("initMain", {control: this.control}, undefined, [this.control]);
+
+    this.main.initialized = false;
 
     for (var i = 0; i < this.shardCount; i++) {
       var shard = new RPCWorker(new Worker('simulation.js'));
@@ -703,6 +710,19 @@
 
   sabProxy.prototype.sendCommand = function(cmd, args) {
     var proxy = this;
+
+    if (proxy.initialized) {
+      if (cmd == fluid.control.JACOBI) {
+        fluid.sendJacobiCommand(args, proxy.control, proxy.controlMem, proxy.controlFloat);
+      } else if (cmd == fluid.control.QUIT) {
+        fluid.sendQuitCommand(proxy.control, proxy.controlMem);
+      } else {
+        console.error(cmd);
+        throw cmd;
+      }
+      return;
+    }
+
     return new Promise(function(resolve) {
       if (cmd == fluid.control.JACOBI) {
         //var begin = performance.now();
@@ -710,6 +730,7 @@
           "jacobiMain",
           args,
           function(result) {
+            proxy.initialized = true;
             //var outside = performance.now() - begin;
             //console.log(outside, result.time, outside - result.time);
             resolve();
@@ -721,6 +742,7 @@
           "quitMain",
           args,
           function() {
+            proxy.initialized = true;
             console.log("Quit done.");
             resolve();
           }
@@ -748,8 +770,10 @@
 
       console.log("destroying.");
 
+      proxy.control.condDestroy(fluid.control.barrierSemiphore);
+      proxy.control.mutexDestroy(fluid.control.barrierMutex);
+      proxy.control.barrierDestroy(fluid.control.workerBarrier);
       proxy.control.condDestroy(fluid.control.mainWait);
-      proxy.control.condDestroy(fluid.control.workerSync);
       proxy.control.condDestroy(fluid.control.workerWait);
       proxy.control.mutexDestroy(fluid.control.lock);
     });
@@ -831,6 +855,11 @@
   };
 
   exports.runFluid = function() {
+    // Minimize a V8 inlining bug.
+    if (window.gc) {
+      gc();
+    }
+
     var c = document.getElementsByTagName("canvas")[0];
     state.ctx = c.getContext("2d");
 

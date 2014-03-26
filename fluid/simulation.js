@@ -1,3 +1,5 @@
+"use strict";
+
 if (typeof this.performance === 'undefined') {
   this.performance = {};
 }
@@ -8,6 +10,32 @@ if (!this.performance.now){
     return Date.now() - nowOffset;
   }
 }
+
+var PerformanceTracker = function(name, period) {
+  this.name = name;
+  this.period = period;
+  this.accum = 0;
+  this.accum2 = 0;
+  this.count = 0;
+};
+
+PerformanceTracker.prototype.begin = function() {
+  this.beginTime = performance.now();
+}
+
+PerformanceTracker.prototype.end = function() {
+  var dt = performance.now() - this.beginTime;
+  this.accum += dt;
+  this.accum2 += dt*dt;
+  this.count += 1;
+  if (this.count >= this.period) {
+    var v = (this.accum2 - this.accum*this.accum/this.count)/(this.count - 1);
+    console.log(this.name + ": " + (this.accum / this.count) + " / " + Math.sqrt(v));
+    this.accum = 0;
+    this.accum2 = 0;
+    this.count = 0;
+  }
+};
 
 var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
 
@@ -152,7 +180,10 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
     }
   };
 
-  var jacobiRegionSync = function(inp, fb, out, params, x, y, w, h, control, controlMem) {
+  var jacobiPerf = new PerformanceTracker("jacobi", 100);
+
+  var jacobiRegionSync = function(inp, fb, out, params, x, y, w, h, control, controlUint) {
+    jacobiPerf.begin();
     var a = params.a;
     var invB = params.invB;
 
@@ -166,9 +197,12 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
       fb = out;
       out = temp;
 
-      fluid.syncWorkers(control, controlMem);
+      fluid.syncWorkers(control, controlUint);
+
       jacobiIteration(inp, fb, out, a, invB, x, y, w, h);
     }
+
+    jacobiPerf.end();
   };
 
   // Assumes an even number of iterations so that buffer swapping leaves the
@@ -204,7 +238,7 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
     this.hmask = (h-1)|0;
   };
 
-  Buffer.prototype.index = function(x, y) {
+  Buffer.prototype.bufferIndex = function(x, y) {
     //var w = this.width;
     //var h = this.height;
     //x = x - Math.floor(x / w) * w;
@@ -214,15 +248,15 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
   };
 
   Buffer.prototype.get = function(x, y) {
-    return this.data[this.index(x, y)];
+    return this.data[this.bufferIndex(x, y)];
   };
 
   Buffer.prototype.set = function(x, y, data) {
-    this.data[this.index(x, y)] = data;
+    this.data[this.bufferIndex(x, y)] = data;
   };
 
   Buffer.prototype.sub = function(x, y, data) {
-    this.data[this.index(x, y)] -= data;
+    this.data[this.bufferIndex(x, y)] -= data;
   };
 
   var blend = function(x, y, amt) {
@@ -423,36 +457,44 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
     //console.log("Done.");
   };
 
-  exports.fluid.syncWorkers = function(control, controlMem) {
+  exports.fluid.sendJacobiCommand = function(args, control, controlMem, controlFloat) {
     control.mutexLock(fluid.control.lock);
-
-    controlMem[fluid.control.running] -= 1;
-    controlMem[fluid.control.waiting] += 1;
-
-    if (controlMem[fluid.control.running] > 0 || controlMem[fluid.control.waking] > 0) {
-      //console.log("Waiting for sync " + fluid.controlStatusString(controlMem));
-      control.condWait(fluid.control.workerWait, fluid.control.lock);
-    } else {
-      var temp = controlMem[fluid.control.waiting];
-      controlMem[fluid.control.waiting] = 0;
-      controlMem[fluid.control.waking] = temp;
-      //console.log("Broadcasting " + fluid.controlStatusString(controlMem));
-      control.condBroadcast(fluid.control.workerWait);
-    }
-
-    controlMem[fluid.control.waking] -= 1;
-    controlMem[fluid.control.running] += 1;
-
-    //console.log("Sync done " + fluid.controlStatusString(controlMem));
+    controlFloat[fluid.control.jacobiA >> 2] = args.a;
+    controlFloat[fluid.control.jacobiInvB >> 2] = args.invB;
+    controlMem[fluid.control.jacobiIterations] = args.iterations;
     control.mutexUnlock(fluid.control.lock);
+    fluid.sendCommand(fluid.control.JACOBI, control, controlMem);
+  };
+
+  exports.fluid.sendQuitCommand = function(control, controlMem) {
+    fluid.sendCommand(fluid.control.QUIT, control, controlMem);
+  };
+
+  var syncPerf = new PerformanceTracker("sync", 5000);
+
+  exports.fluid.syncWorkers = function(control, controlUint) {
+    syncPerf.begin();
+    if (true) {
+      control.barrierWait(fluid.control.workerBarrier);
+    } else {
+      control.mutexLock(fluid.control.barrierMutex);
+      controlUint[fluid.control.barrierCurrent>>2] += 1;
+      if (controlUint[fluid.control.barrierCurrent>>2] >= controlUint[fluid.control.barrierMax>>2] ) {
+        control.condWait(fluid.control.barrierSemiphore, fluid.control.barrierMutex);
+      } else {
+        controlUint[fluid.control.barrierCurrent>>2] = 0;
+        control.condBroadcast(fluid.control.barrierSemiphore);
+      }
+      control.mutexUnlock(fluid.control.barrierMutex);
+    }
+    syncPerf.end();
   };
 
 
   exports.fluid.control = {
     lock: 0,
     workerWait: 64,
-    workerSync: 128,
-    mainWait: 192,
+    mainWait: 128,
 
     waiting: 256,
     waking: 257,
@@ -464,7 +506,14 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
     jacobiInvB: 264,
     jacobiIterations: 268,
 
-    size: 512,
+    workerBarrier: 512,
+
+    barrierMutex: 768,
+    barrierSemiphore: 832,
+    barrierMax: 896,
+    barrierCurrent: 900,
+
+    size: 1024,
 
     INIT: 0,
     JACOBI: 1,
@@ -488,11 +537,11 @@ if (this.self !== undefined) {
       state.workerID = args.workerID;
       state.shards = args.shards;
 
-      state.u = new fluid.Buffer(w, h, null);
-      state.v = new fluid.Buffer(w, h, null);
-      state.inp = new fluid.Buffer(w, h, null);
+      state.u = new fluid.Buffer(w, h);
+      state.v = new fluid.Buffer(w, h);
+      state.inp = new fluid.Buffer(w, h);
       state.fb  = new fluid.Buffer(w, h);
-      state.out = new fluid.Buffer(w, h, null);
+      state.out = new fluid.Buffer(w, h);
 
       // HACK assuming readonly based on presense of args.broadcast.
       if (args.broadcast) {
@@ -559,20 +608,13 @@ if (this.self !== undefined) {
 
     "jacobiMain": function(msg) {
       var begin = performance.now();
-
-      state.control.mutexLock(fluid.control.lock);
-      state.controlFloat[fluid.control.jacobiA >> 2] = msg.args.a;
-      state.controlFloat[fluid.control.jacobiInvB >> 2] = msg.args.invB;
-      state.controlMem[fluid.control.jacobiIterations] = msg.args.iterations;
-      state.control.mutexUnlock(fluid.control.lock);
-
-      fluid.sendCommand(fluid.control.JACOBI, state.control, state.controlMem);
+      fluid.sendJacobiCommand(msg.args, state.control, state.controlMem, state.controlFloat)
       self.postMessage({uid: msg.uid, time: performance.now() - begin});
     },
 
     "quitMain": function(msg) {
       var begin = performance.now();
-      fluid.sendCommand(fluid.control.QUIT, state.control, state.controlMem);
+      fluid.sendQuitCommand(state.control, state.controlMem)
       console.log("quit " + (performance.now() - begin));
       self.postMessage({uid: msg.uid});
     },
@@ -600,6 +642,7 @@ if (this.self !== undefined) {
 
       var control = args.control;
       var controlMem = new Uint8Array(control);
+      var controlUint = new Uint32Array(control);
       var controlFloat = new Float32Array(control);
 
       var statusString = function() {
@@ -646,7 +689,7 @@ if (this.self !== undefined) {
             fluid.jacobiRegionSync(state.broadcast, state.fb, state.reply, jparams,
                                    policy.bufferX(state.workerID), policy.bufferY(state.workerID),
                                    policy.bufferW, policy.bufferH,
-                                   control, controlMem);
+                                   control, controlUint);
 
             //policy.gatherShardOutput(state.workerID, state.temp, state.reply);
           }
