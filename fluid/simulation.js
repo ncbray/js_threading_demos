@@ -406,6 +406,25 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
 
   exports.fluid.ceilPOT = ceilPOT;
 
+  // Horrible hack to work around V8's postMessage changing the effective type
+  // of TypedArrays when they are touched by postMessage.
+  exports.fluid.marshalFloat32Array = function(obj) {
+    if (!(obj instanceof Float32Array)) {
+      throw obj;
+    }
+    return obj.buffer;
+  };
+
+  exports.fluid.marshaledBuffer = function(obj) {
+    return obj;
+  }
+
+  exports.fluid.unmarshalFloat32Array = function(obj) {
+    if (!(obj instanceof ArrayBuffer)) {
+      throw obj;
+    }
+    return new Float32Array(obj);
+  };
 
   exports.fluid.controlStatusString = function(controlMem) {
       return controlMem[fluid.control.waiting] + "/" + controlMem[fluid.control.waking] + "/" + controlMem[fluid.control.running];
@@ -545,41 +564,43 @@ if (this.self !== undefined) {
 
       // HACK assuming readonly based on presense of args.broadcast.
       if (args.broadcast) {
-        state.broadcast = new fluid.Buffer(w, h, args.broadcast);
-        state.reply = new fluid.Buffer(w, h, args.reply);
+        state.broadcast = new fluid.Buffer(w, h, fluid.unmarshalFloat32Array(args.broadcast));
+        state.reply = new fluid.Buffer(w, h, fluid.unmarshalFloat32Array(args.reply));
       }
       // Overallocate to allow for varying iteration counts.
       state.temp = new fluid.Buffer(w, h);
     },
     "updateVelocity": function(msg) {
       var args = msg.args;
-      state.u.data = args.u;
-      state.v.data = args.v;
+      state.u.data = fluid.unmarshalFloat32Array(args.u);
+      state.v.data = fluid.unmarshalFloat32Array(args.v);
     },
     "jacobi": function(msg) {
       var args = msg.args;
-      state.inp.data = args.inp;
-      state.out.data = args.out;
+      state.inp.data = fluid.unmarshalFloat32Array(args.inp);
+      state.out.data = fluid.unmarshalFloat32Array(args.out);
       fluid.jacobi(state.inp, state.fb, state.out, args.params);
-      self.postMessage({uid: msg.uid, inp: args.inp, out: args.out}, [args.inp.buffer, args.out.buffer]);
+      self.postMessage(
+        {uid: msg.uid, inp: args.inp, out: args.out},
+        [fluid.marshaledBuffer(args.inp), fluid.marshaledBuffer(args.out)]
+      );
     },
     "shardedJacobi": function(msg) {
       var begin = performance.now();
       var args = msg.args;
-      state.inp.data = args.inp;
-      state.temp.data = args.out;
+      state.inp.data = fluid.unmarshalFloat32Array(args.inp);
+      state.temp.data = fluid.unmarshalFloat32Array(args.out);
 
       var policy = new fluid.TorusShardingPolicy(state.w, state.h, args.params.iterations - 1, state.shards);
       fluid.jacobiRegion(state.inp, state.fb, state.temp, args.params,
                          policy.bufferX(state.workerID), policy.bufferY(state.workerID),
                          policy.bufferW, policy.bufferH);
-
       self.postMessage({
         uid: msg.uid,
         out: args.out,
         time: performance.now() - begin
       }, [
-        args.out.buffer
+        fluid.marshaledBuffer(args.out)
       ]);
     },
     "shardedJacobiRO": function(msg) {
@@ -629,11 +650,11 @@ if (this.self !== undefined) {
       state.workerID = args.workerID;
       state.shards = args.shards;
 
-      state.broadcast = new fluid.Buffer(w, h, args.broadcast);
-      state.fb = new fluid.Buffer(w, h, args.fb);
-      state.reply = new fluid.Buffer(w, h, args.reply);
-      state.u = new fluid.Buffer(w, h, args.u);
-      state.v = new fluid.Buffer(w, h, args.v);
+      state.broadcast = new fluid.Buffer(w, h, fluid.unmarshalFloat32Array(args.broadcast));
+      state.fb = new fluid.Buffer(w, h, fluid.unmarshalFloat32Array(args.fb));
+      state.reply = new fluid.Buffer(w, h, fluid.unmarshalFloat32Array(args.reply));
+      state.u = new fluid.Buffer(w, h, fluid.unmarshalFloat32Array(args.u));
+      state.v = new fluid.Buffer(w, h, fluid.unmarshalFloat32Array(args.v));
 
       state.temp = new fluid.Buffer(w, h);
 

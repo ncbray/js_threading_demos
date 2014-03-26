@@ -427,11 +427,11 @@
 
     if (readonly) {
       this.broadcast = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
-      initArgs.broadcast = this.broadcast.data;
+      initArgs.broadcast = fluid.marshalFloat32Array(this.broadcast.data);
       initTransfer.push(this.broadcast.data.buffer);
 
       this.reply = new fluid.Buffer(w, h, new Float32Array(new ArrayBuffer(w * h * 4, true)));
-      initArgs.reply = this.reply.data;
+      initArgs.reply = fluid.marshalFloat32Array(this.reply.data);
       initTransfer.push(this.reply.data.buffer);
     }
 
@@ -453,8 +453,8 @@
         this.shards[i].rpc(
           "updateVelocity",
           {
-            u: this.u.data,
-            v: this.v.data
+            u: fluid.marshalFloat32Array(this.u.data),
+            v: fluid.marshalFloat32Array(this.v.data)
           },
           undefined,
           [this.u.data.buffer, this.v.data.buffer]
@@ -480,8 +480,8 @@
         this.shards[i].rpc(
           "updateVelocity",
           {
-            u: u.data,
-            v: v.data
+            u: fluid.marshalFloat32Array(u.data),
+            v: fluid.marshalFloat32Array(v.data)
           }
         );
       }
@@ -540,12 +540,12 @@
               proxy.shards[i].rpc(
                 "shardedJacobi",
                 {
-                  inp: inp.data,
-                  out: temp.data,
+                  inp: fluid.marshalFloat32Array(inp.data),
+                  out: fluid.marshalFloat32Array(temp.data),
                   params: jparams
                 },
                 function(result) {
-                  temp.data = result.out;
+                  temp.data = fluid.unmarshalFloat32Array(result.out);
                   policy.gatherShardOutput(i, temp, out);
                   //shardDone(performance.now() - begin, result.time);
                   remaining -= 1;
@@ -565,13 +565,13 @@
         proxy.shards[0].rpc(
           "jacobi",
           {
-            inp: inp.data,
-            out: out.data,
+            inp: fluid.marshalFloat32Array(inp.data),
+            out: fluid.marshalFloat32Array(out.data),
             params: jparams
           },
           function(result) {
-            inp.data = result.inp;
-            out.data = result.out;
+            inp.data = fluid.unmarshalFloat32Array(result.inp);
+            out.data = fluid.unmarshalFloat32Array(result.out);
             resolve();
           },
           [
@@ -646,11 +646,11 @@
           h: this.h,
           workerID: i,
           shards: this.shardCount,
-          broadcast: this.broadcast.data,
-          fb: this.fb.data,
-          reply: this.reply.data,
-          u: this.u.data,
-          v: this.v.data,
+          broadcast: fluid.marshalFloat32Array(this.broadcast.data),
+          fb: fluid.marshalFloat32Array(this.fb.data),
+          reply: fluid.marshalFloat32Array(this.reply.data),
+          u: fluid.marshalFloat32Array(this.u.data),
+          v: fluid.marshalFloat32Array(this.v.data),
           control: this.control,
         },
         undefined,
