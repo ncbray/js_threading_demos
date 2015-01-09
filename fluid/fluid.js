@@ -881,10 +881,10 @@
 
     parent.appendChild(simTime.domElement);
     parent.appendChild(jacobiTime.domElement);
-    parent.appendChild(advectTime.domElement);
-    parent.appendChild(copyTime.domElement);
-    parent.appendChild(drawTime.domElement);
-    parent.appendChild(frameTime.domElement);
+    //parent.appendChild(advectTime.domElement);
+    //parent.appendChild(copyTime.domElement);
+    //parent.appendChild(drawTime.domElement);
+    //parent.appendChild(frameTime.domElement);
 
     var button = document.createElement("input");
     button.type = "button";

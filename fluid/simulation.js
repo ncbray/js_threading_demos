@@ -407,7 +407,10 @@ var sharedMemorySupported = new ArrayBuffer(1, true).shared == true;
   exports.fluid.ceilPOT = ceilPOT;
 
   // Horrible hack to work around V8's postMessage changing the effective type
-  // of TypedArrays when they are touched by postMessage.
+  // of TypedArrays when they are touched by postMessage.  The changing type can
+  // result in unexplainably bad performance.  Instead of sending the typed
+  // array, send the underlying buffer.  Currently all typed arrays cover their
+  // entire buffer
   exports.fluid.marshalFloat32Array = function(obj) {
     if (!(obj instanceof Float32Array)) {
       throw obj;
